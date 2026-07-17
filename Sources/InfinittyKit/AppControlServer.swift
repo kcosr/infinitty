@@ -30,6 +30,7 @@ import Foundation
 final class AppControlServer {
     let path: String
     static let currentLink = "/tmp/infinitty-current.sock"
+    private let discoveryLink: String
 
     /// Handles one request line, returns the response body.
     var handler: ((String) -> String)?
@@ -38,11 +39,15 @@ final class AppControlServer {
     private var subscribers: [Int32] = []
     private let subscriberLock = NSLock()
 
-    init() {
+    var isRunning: Bool { listenFD >= 0 }
+
+    init(discoveryLink: String = AppControlServer.currentLink) {
         path = "/tmp/infinitty-app-\(getpid()).sock"
+        self.discoveryLink = discoveryLink
     }
 
     func start() {
+        guard listenFD < 0 else { return }
         unlink(path)
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return }
@@ -76,18 +81,28 @@ final class AppControlServer {
         listenFD = fd
 
         // Stable discovery path for external apps.
-        unlink(AppControlServer.currentLink)
-        symlink(path, AppControlServer.currentLink)
+        unlink(discoveryLink)
+        symlink(path, discoveryLink)
 
-        let thread = Thread { [weak self] in self?.acceptLoop() }
+        let thread = Thread { [weak self] in self?.acceptLoop(fd: fd) }
         thread.name = "infinitty-app-control"
         thread.qualityOfService = .utility
         thread.start()
     }
 
     func stop() {
-        if listenFD >= 0 { close(listenFD) }
+        let fd = listenFD
+        listenFD = -1
+        if fd >= 0 {
+            _ = Darwin.shutdown(fd, SHUT_RDWR)
+            close(fd)
+        }
         unlink(path)
+        if let destination = try? FileManager.default.destinationOfSymbolicLink(
+            atPath: discoveryLink),
+           destination == path {
+            unlink(discoveryLink)
+        }
         subscriberLock.lock()
         for fd in subscribers { close(fd) }
         subscribers.removeAll()
@@ -112,9 +127,9 @@ final class AppControlServer {
         subscriberLock.unlock()
     }
 
-    private func acceptLoop() {
+    private func acceptLoop(fd: Int32) {
         while true {
-            let client = accept(listenFD, nil, nil)
+            let client = accept(fd, nil, nil)
             if client < 0 {
                 if errno == EINTR { continue }
                 break

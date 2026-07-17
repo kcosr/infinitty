@@ -153,7 +153,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         appControl.handler = { [weak self] request in
             self?.handleAppRequest(request) ?? "error: shutting down"
         }
-        appControl.start()
+        if config.controlSockets { appControl.start() }
         openWindow(cwd: initialWorkingDirectory)
         launchCompleted = true
         watchConfigFile()
@@ -1355,10 +1355,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     private func reloadConfig() {
         config = AppConfig.load()
+        if !config.controlSockets { appControl.stop() }
         quickTerminal.applyConfig(config)
         configureQuickTerminalHotKey()
         var windows = Set<NSWindow>()
         for s in sessions {
+            s.setControlSocketsEnabled(config.controlSockets)
             let scale = s.view.window?.backingScaleFactor
                 ?? NSScreen.main?.backingScaleFactor ?? 2
             s.renderer.applyConfig(config, scale: scale)
@@ -1373,6 +1375,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 win.contentResizeIncrements = s.renderer.cellSizePoints
             }
         }
+        if config.controlSockets { appControl.start() }
         refreshPets()
         if config.notch { notch.show(display: config.notchDisplay) } else { notch.hide() }
         watchConfigFile() // re-arm (file may have been atomically replaced)

@@ -66,8 +66,20 @@ final class TerminalSession: NSObject {
         control.activityHandler = { [weak view] in
             DispatchQueue.main.async { view?.showAgentGlow() }
         }
-        control.start()
+        setControlSocketsEnabled(config.controlSockets)
         applyMarkdownConfig(config)
+    }
+
+    var controlSocketPath: String? {
+        control.isRunning ? control.path : nil
+    }
+
+    func setControlSocketsEnabled(_ enabled: Bool) {
+        if enabled {
+            control.start()
+        } else {
+            control.stop()
+        }
     }
 
     private var hintEngine: HintEngine?
@@ -104,7 +116,7 @@ final class TerminalSession: NSObject {
         view.window?.layoutIfNeeded()
         pty.spawn(
             cols: terminal.cols, rows: terminal.rows,
-            socketPath: control.path, cwd: workingDirectory)
+            socketPath: controlSocketPath, cwd: workingDirectory)
         // Foreground process tracking starts once the shell PID is alive.
         if pty.pid > 0 {
             let tracker = ForegroundProcessTracker(shellPid: pty.pid)

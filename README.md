@@ -74,6 +74,10 @@ printf 'send-line ls\n'  | nc -U "$INFINITTY_SOCKET"   # type into the terminal
 printf 'send text\n'     | nc -U "$INFINITTY_SOCKET"   # type without return
 ```
 
+Set `control-sockets = false` in the config to disable both the app-level and
+per-pane sockets. The listeners stop on live reload; newly launched shells no
+longer receive `$INFINITTY_SOCKET` (or its legacy alias).
+
 `*` needs OSC 133 semantic prompts — source `shell-integration/infinitty.zsh`
 from your `~/.zshrc`. infinitty parses the markers (prompt start, input start,
 output start, exit) and tracks command regions by absolute line number, so
