@@ -23,4 +23,19 @@ final class NotchTerminalMenuTests: XCTestCase {
         XCTAssertEqual(frame.midX, screen.midX)
         XCTAssertEqual(frame.maxY, screen.maxY)
     }
+
+    func testCompactMenuAvoidsActivityOnDisplayWithoutNotch() {
+        let screen = NSRect(x: 100, y: 50, width: 1_920, height: 1_080)
+        let frame = NotchTerminalMenuLayout.frame(
+            in: screen,
+            safeAreaTop: 0,
+            avoidingActivity: true)
+
+        XCTAssertEqual(
+            frame.maxX,
+            screen.midX
+                - NotchTerminalMenuLayout.activityWidth / 2
+                - NotchTerminalMenuLayout.activityGap)
+        XCTAssertEqual(frame.maxY, screen.maxY)
+    }
 }

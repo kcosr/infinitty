@@ -28,6 +28,7 @@
 # background-opacity = 0.92
 # background-blur    = true        # frosted blur behind the window
 # notch          = true            # live activity beside the MacBook notch
+# notch-terminal-menu = true        # terminal-list button left of the notch
 
 # codex pets (~/.codex/pets)
 # pet       = r2d2

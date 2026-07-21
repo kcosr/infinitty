@@ -237,7 +237,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
         if config.notch { notch.show(display: config.notchDisplay) }
         if config.notchTerminalMenu {
-            notchTerminalMenu.show(display: config.notchDisplay)
+            notchTerminalMenu.show(
+                display: config.notchDisplay,
+                avoidingActivity: config.notch)
         }
         if ProcessInfo.processInfo.environment["INFINITTY_SHOW_SETTINGS"] != nil {
             openSettings(nil) // UI testing hook
@@ -889,6 +891,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 detached.removePane(v)
                 if detachedPreview.detached === detached {
                     detachedPreview.refreshRoot()
+                    if let previewWindow = detachedPreview.window {
+                        updateTitle(for: previewWindow)
+                    }
                 }
             }
             refreshDetachedTerminalsMenu()
@@ -1385,9 +1390,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     @objc private func focusNotchStandardTerminal(_ sender: NSMenuItem) {
         guard let window = sender.representedObject as? NSWindow,
               window.tabbingIdentifier == "infinitty",
-              window !== quickTerminal.window else { return }
+              window !== quickTerminal.window,
+              !activeSessions(in: window).isEmpty else { return }
         window.tabGroup?.selectedWindow = window
         NSApp.activate(ignoringOtherApps: true)
+        if window.isMiniaturized { window.deminiaturize(nil) }
         window.makeKeyAndOrderFront(nil)
         if !(window.firstResponder is TerminalView),
            let session = activeSessions(in: window).first {
@@ -2038,7 +2045,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         refreshPets()
         if config.notch { notch.show(display: config.notchDisplay) } else { notch.hide() }
         if config.notchTerminalMenu {
-            notchTerminalMenu.show(display: config.notchDisplay)
+            notchTerminalMenu.show(
+                display: config.notchDisplay,
+                avoidingActivity: config.notch)
         } else {
             notchTerminalMenu.hide()
         }
