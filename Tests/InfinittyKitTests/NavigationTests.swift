@@ -125,6 +125,10 @@ final class NavigationTests: XCTestCase {
         XCTAssertEqual(tabs.item(withTitle: "Tab 1")?.keyEquivalentModifierMask, [.command])
         XCTAssertEqual(tabs.item(withTitle: "Last Tab")?.keyEquivalent, "9")
 
+        let detached = try XCTUnwrap(window.item(withTitle: "Detached Terminals"))
+        XCTAssertTrue(detached.isHidden)
+        XCTAssertNotNil(detached.submenu)
+
         let panes = try XCTUnwrap(window.item(withTitle: "Focus Pane")?.submenu)
         let left = try XCTUnwrap(panes.item(withTitle: "Left"))
         XCTAssertEqual(left.keyEquivalent, "\u{F702}")

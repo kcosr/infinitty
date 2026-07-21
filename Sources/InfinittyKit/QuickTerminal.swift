@@ -131,9 +131,10 @@ enum QuickTerminalHideReason: Equatable {
 enum QuickTerminalResidency {
     static func shouldTerminateAfterLastWindowClosed(
         hasRegisteredHotKey: Bool,
-        hasLiveSession: Bool
+        hasLiveSession: Bool,
+        hasDetachedTerminal: Bool = false
     ) -> Bool {
-        !hasRegisteredHotKey && !hasLiveSession
+        !hasRegisteredHotKey && !hasLiveSession && !hasDetachedTerminal
     }
 }
 
@@ -243,6 +244,7 @@ final class QuickTabRenameTextView: TabRenameTextView {
 final class QuickTerminalTabStripView: NSView {
     var onSelect: ((Int) -> Void)?
     var onRenameRequest: ((Int) -> Void)?
+    var onDetach: ((Int) -> Void)?
     var onNewTab: (() -> Void)?
     var onClose: ((Int) -> Void)?
     var onRenameCommit: ((String) -> Void)?
@@ -317,6 +319,14 @@ final class QuickTerminalTabStripView: NSView {
                 button.wantsLayer = true
                 button.layer?.cornerRadius = 6
                 button.layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
+                let menu = NSMenu()
+                let detach = menu.addItem(
+                    withTitle: "Detach",
+                    action: #selector(detachPressed(_:)),
+                    keyEquivalent: "")
+                detach.target = self
+                detach.tag = index
+                button.menu = menu
                 addSubview(button)
                 return button
             }
@@ -463,8 +473,17 @@ final class QuickTerminalTabStripView: NSView {
         }
     }
 
+    func handleDetachRequest(at index: Int) {
+        guard buttons.indices.contains(index) else { return }
+        commitRename()
+        onDetach?(index)
+    }
+
     @objc private func tabPressed(_ sender: NSButton) {
         handleTabClick(at: sender.tag, clickCount: NSApp.currentEvent?.clickCount ?? 1)
+    }
+    @objc private func detachPressed(_ sender: NSMenuItem) {
+        handleDetachRequest(at: sender.tag)
     }
     @objc private func addPressed(_ sender: Any?) {
         commitRename() // ditto: "+" mid-rename saves the typed name first
@@ -518,6 +537,7 @@ struct QuickTerminalTabID: Hashable {
 /// touching its live TerminalSession, so scrollback and child processes survive.
 final class QuickTerminalController: NSObject, NSWindowDelegate {
     typealias WindowFactory = () -> (NSWindow, TerminalSession)?
+    typealias AdoptedWindowFactory = (NSView, TerminalSession) -> NSWindow?
     typealias TabFactory = (NSWindow) -> (NSView, TerminalSession)?
     typealias SessionsProvider = (NSView) -> [TerminalSession]
 
@@ -535,6 +555,7 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
     }
 
     private let makeWindow: WindowFactory
+    private let makeAdoptedWindow: AdoptedWindowFactory
     private let makeTab: TabFactory
     private let sessionsInPage: SessionsProvider
     private let launchSession: (TerminalSession) -> Void
@@ -550,10 +571,12 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
     private var transition: UInt64 = 0
     private(set) var visible = false
     var onTabsChanged: (() -> Void)?
+    var onTabDetached: ((DetachedTerminal) -> Void)?
 
     init(
         config: AppConfig,
         makeWindow: @escaping WindowFactory,
+        makeAdoptedWindow: @escaping AdoptedWindowFactory = { _, _ in nil },
         makeTab: @escaping TabFactory,
         sessionsInPage: @escaping SessionsProvider,
         heightState: QuickTerminalHeightState = QuickTerminalHeightState(),
@@ -561,6 +584,7 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
     ) {
         self.config = config
         self.makeWindow = makeWindow
+        self.makeAdoptedWindow = makeAdoptedWindow
         self.makeTab = makeTab
         self.sessionsInPage = sessionsInPage
         self.heightState = heightState
@@ -695,6 +719,82 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
         launchSession(session)
         onTabsChanged?()
         return session
+    }
+
+    /// Move an internal quick tab into the app-wide detached holding area
+    /// without terminating any of its panes.
+    @discardableResult
+    func detachTab(at index: Int) -> DetachedTerminal? {
+        _ = tabsView?.strip.commitRename()
+        guard tabs.indices.contains(index), let tabsView else { return nil }
+        let tab = tabs[index]
+        if index == selectedIndex,
+           let focused = window?.firstResponder as? TerminalView,
+           contains(focused, in: tab.page) {
+            tab.lastFocusedView = focused
+        }
+        guard let content = tab.page.subviews.first else { return nil }
+        content.removeFromSuperview()
+        tabsView.remove(tab.page)
+        tabs.remove(at: index)
+
+        let detached = DetachedTerminal(
+            rootView: content,
+            customTitle: tab.customTitle,
+            preferredFocus: tab.lastFocusedView)
+        // Publish residency before closing an emptied panel; otherwise AppKit
+        // can ask whether the application should terminate in the narrow gap
+        // between the panel closing and the detached item being registered.
+        onTabDetached?(detached)
+        if tabs.isEmpty {
+            lastSessionDidExit()
+        } else {
+            if index < selectedIndex {
+                selectedIndex -= 1
+            } else if index == selectedIndex {
+                selectedIndex = min(index, tabs.count - 1)
+            }
+            showTab(at: selectedIndex)
+            onTabsChanged?()
+        }
+        return detached
+    }
+
+    /// Append a detached terminal tree as the last quick tab. A panel can be
+    /// built around the adopted tree without creating or launching a new shell.
+    @discardableResult
+    func adopt(_ detached: DetachedTerminal) -> Bool {
+        let sessions = sessionsInPage(detached.rootView)
+        guard let firstSession = sessions.first else { return false }
+        let automaticTitle = detached.preferredFocus.flatMap { focused in
+            sessions.first { $0.view === focused }?.title
+        } ?? firstSession.title
+
+        if window != nil, let tabsView {
+            detached.rootView.removeFromSuperview()
+            let page = QuickTerminalTabPageView(content: detached.rootView)
+            let tab = Tab(page: page, automaticTitle: automaticTitle)
+            tab.customTitle = detached.customTitle
+            tab.lastFocusedView = detached.preferredFocus
+            tabs.append(tab)
+            tabsView.install(page)
+            _ = selectTab(at: tabs.count - 1)
+            if !visible { show() }
+            return true
+        }
+
+        guard let window = makeAdoptedWindow(detached.rootView, firstSession) else {
+            return false
+        }
+        installInitialTab(
+            in: window,
+            content: detached.rootView,
+            automaticTitle: automaticTitle,
+            customTitle: detached.customTitle,
+            lastFocusedView: detached.preferredFocus,
+            sessionToLaunch: nil)
+        show()
+        return true
     }
 
     @discardableResult
@@ -889,13 +989,44 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
         }
         guard let (window, session) = makeWindow() else { return nil }
         guard let initialContent = window.contentView else { return nil }
+        installInitialTab(
+            in: window,
+            content: initialContent,
+            automaticTitle: session.title,
+            customTitle: nil,
+            lastFocusedView: nil,
+            sessionToLaunch: session)
+        return (window, session)
+    }
+
+    private func installInitialTab(
+        in window: NSWindow,
+        content initialContent: NSView,
+        automaticTitle: String,
+        customTitle: String?,
+        lastFocusedView: TerminalView?,
+        sessionToLaunch: TerminalSession?
+    ) {
         let tabsView = QuickTerminalTabsView(frame: initialContent.frame)
         window.contentView = tabsView
         let firstPage = QuickTerminalTabPageView(content: initialContent)
         tabsView.install(firstPage)
-        tabs = [Tab(page: firstPage, automaticTitle: session.title)]
+        let firstTab = Tab(page: firstPage, automaticTitle: automaticTitle)
+        firstTab.customTitle = customTitle
+        firstTab.lastFocusedView = lastFocusedView
+        tabs = [firstTab]
         selectedIndex = 0
         self.tabsView = tabsView
+        configureCallbacks(for: tabsView)
+        self.window = window
+        showTab(at: 0)
+        window.delegate = self
+        configureWindow()
+        if let sessionToLaunch { launchSession(sessionToLaunch) }
+        onTabsChanged?()
+    }
+
+    private func configureCallbacks(for tabsView: QuickTerminalTabsView) {
         tabsView.strip.onSelect = { [weak self] index in
             _ = self?.selectTab(at: index)
         }
@@ -909,6 +1040,9 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
         }
         tabsView.strip.onNewTab = { [weak self] in
             _ = self?.newTab()
+        }
+        tabsView.strip.onDetach = { [weak self] index in
+            _ = self?.detachTab(at: index)
         }
         tabsView.strip.onClose = { [weak self] index in
             self?.closeTab(at: index)
@@ -924,13 +1058,6 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
             self?.renamingTabID = nil
             self?.restoreActiveResponder()
         }
-        self.window = window
-        showTab(at: 0)
-        window.delegate = self
-        configureWindow()
-        launchSession(session)
-        onTabsChanged?()
-        return (window, session)
     }
 
     @discardableResult
