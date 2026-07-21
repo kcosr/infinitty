@@ -58,3 +58,125 @@ final class DetachedTerminal {
         }
     }
 }
+
+final class DetachedTerminalPreviewPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { true }
+}
+
+/// Temporarily hosts one DetachedTerminal in a floating panel. Dismissal only
+/// removes the window shell; the live terminal tree stays owned by the same
+/// DetachedTerminal and returns to its menu entry unchanged.
+final class DetachedTerminalPreviewController: NSObject, NSWindowDelegate {
+    private(set) var detached: DetachedTerminal?
+    private(set) var window: DetachedTerminalPreviewPanel?
+    var onDismiss: (() -> Void)?
+
+    private var presentationGeneration: UInt64 = 0
+    private var ignoreResignUntil = Date.distantPast
+    private var dismissing = false
+
+    @discardableResult
+    func present(
+        _ detached: DetachedTerminal,
+        title: String,
+        activate: Bool = true
+    ) -> NSWindow {
+        dismiss()
+        presentationGeneration &+= 1
+        ignoreResignUntil = Date().addingTimeInterval(0.25)
+        self.detached = detached
+
+        let root = detached.rootView
+        root.removeFromSuperview()
+        let size = NSSize(
+            width: root.bounds.width > 100 ? root.bounds.width : 960,
+            height: root.bounds.height > 100 ? root.bounds.height : 520)
+        root.frame = NSRect(origin: .zero, size: size)
+        root.autoresizingMask = [.width, .height]
+
+        let panel = DetachedTerminalPreviewPanel(
+            contentRect: NSRect(origin: .zero, size: size),
+            styleMask: [.titled, .closable, .resizable, .utilityWindow],
+            backing: .buffered,
+            defer: false)
+        panel.title = title
+        panel.isReleasedWhenClosed = false
+        panel.appearance = NSAppearance(named: .darkAqua)
+        panel.level = .floating
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.contentView = root
+        panel.delegate = self
+        panel.center()
+        self.window = panel
+
+        if activate {
+            NSApp.activate(ignoringOtherApps: true)
+            panel.makeKeyAndOrderFront(nil)
+            if let preferredFocus = detached.preferredFocus {
+                panel.makeFirstResponder(preferredFocus)
+            }
+        } else {
+            panel.orderFront(nil)
+        }
+        return panel
+    }
+
+    @discardableResult
+    func dismiss(ifPresenting detached: DetachedTerminal? = nil) -> Bool {
+        guard let current = self.detached,
+              detached == nil || current === detached else { return false }
+        dismiss()
+        return true
+    }
+
+    func refreshRoot() {
+        guard let detached, let window,
+              window.contentView !== detached.rootView else { return }
+        detached.rootView.removeFromSuperview()
+        window.contentView = detached.rootView
+        detached.rootView.frame = window.contentLayoutRect
+        detached.rootView.autoresizingMask = [.width, .height]
+    }
+
+    func dismiss() {
+        guard !dismissing, let window else { return }
+        dismissing = true
+        presentationGeneration &+= 1
+        if let detached,
+           let focused = window.firstResponder as? TerminalView,
+           detached.contains(focused) {
+            detached.preferredFocus = focused
+        }
+        window.delegate = nil
+        window.contentView = nil
+        window.orderOut(nil)
+        window.close()
+        self.window = nil
+        detached = nil
+        dismissing = false
+        onDismiss?()
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        dismiss()
+        return false
+    }
+
+    func windowDidResignKey(_ notification: Notification) {
+        guard let panel = notification.object as? NSWindow,
+              panel === window else { return }
+        let generation = presentationGeneration
+        let delay = max(ignoreResignUntil.timeIntervalSinceNow, 0.05)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak panel] in
+            guard let self, let panel,
+                  self.presentationGeneration == generation,
+                  self.window === panel,
+                  !panel.isKeyWindow,
+                  panel.attachedSheet == nil,
+                  panel.childWindows?.contains(where: \.isVisible) != true
+            else { return }
+            self.dismiss()
+        }
+    }
+}

@@ -739,7 +739,12 @@ final class QuickTerminalTabsView: NSView {
 /// value so committing still targets the tab that was active when editing
 /// began, even if the user switches tabs before pressing Return.
 struct QuickTerminalTabID: Hashable {
-    fileprivate let rawValue = UUID()
+    let rawValue = UUID()
+}
+
+struct QuickTerminalTabSummary {
+    let id: QuickTerminalTabID
+    let title: String
 }
 
 /// Manages one persistent quick-terminal window. `orderOut` hides it without
@@ -828,6 +833,9 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
     var activeSessions: [TerminalSession] {
         guard let activeRootView else { return [] }
         return sessionsInPage(activeRootView)
+    }
+    var tabSummaries: [QuickTerminalTabSummary] {
+        tabs.map { QuickTerminalTabSummary(id: $0.id, title: displayTitle(for: $0)) }
     }
 
     func sessions(inTabContaining session: TerminalSession) -> [TerminalSession] {
@@ -1054,6 +1062,20 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
         guard let index = tabs.firstIndex(where: { contains(session.view, in: $0.page) })
         else { return false }
         return selectTab(at: index)
+    }
+
+    @discardableResult
+    func focusTab(id: QuickTerminalTabID) -> Bool {
+        guard let index = tabs.firstIndex(where: { $0.id == id }),
+              selectTab(at: index), let window else { return false }
+        if visible {
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+            restoreActiveResponder()
+        } else {
+            show()
+        }
+        return true
     }
 
     /// Reorder internal quick tabs without moving their attached page trees.

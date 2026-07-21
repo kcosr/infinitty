@@ -48,6 +48,7 @@ struct AppConfig {
     var backgroundOpacity: CGFloat = 1.0
     var backgroundBlur = false // frosted behind-window blur
     var notch = false // live-activity widget beside the MacBook notch
+    var notchTerminalMenu = false // compact terminal menu left of the notch
     var notchDisplay = "builtin" // builtin | external | primary | all
     var markdownCommand = "glow -p" // cmd-click on a .md path runs this
     var markdownRender = "off" // off | auto — auto-render command output via glow
@@ -211,6 +212,8 @@ struct AppConfig {
                 }
             case "notch", "live-activity":
                 notch = AppConfig.parseBool(value)
+            case "notch-terminal-menu", "notch-menu":
+                notchTerminalMenu = AppConfig.parseBool(value)
             case "notch-display", "notch-screen":
                 let v = value.lowercased()
                 if ["builtin", "external", "primary", "focused", "all", "both"].contains(v) {
@@ -349,7 +352,10 @@ struct AppConfig {
         if markdownRender != "off" { out += "markdown-render = \(markdownRender)\n" }
         if notch {
             out += "notch = true\n"
-            if notchDisplay != "builtin" { out += "notch-display = \(notchDisplay)\n" }
+        }
+        if notchTerminalMenu { out += "notch-terminal-menu = true\n" }
+        if (notch || notchTerminalMenu) && notchDisplay != "builtin" {
+            out += "notch-display = \(notchDisplay)\n"
         }
         if let c = foreground { out += "foreground = \(hex(c))\n" }
         if let c = background { out += "background = \(hex(c))\n" }
