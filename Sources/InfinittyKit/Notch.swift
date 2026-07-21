@@ -132,3 +132,110 @@ final class NotchActivityController {
         }
     }
 }
+
+struct NotchTerminalMenuLayout {
+    static let width: CGFloat = 34
+
+    static func frame(in screenFrame: NSRect, safeAreaTop: CGFloat) -> NSRect {
+        let hasNotch = safeAreaTop > 0
+        let height = hasNotch ? max(safeAreaTop, 30) : 26
+        let x = hasNotch
+            ? screenFrame.midX - 110 - width
+            : screenFrame.midX - width / 2
+        return NSRect(
+            x: x,
+            y: screenFrame.maxY - height,
+            width: width,
+            height: height)
+    }
+}
+
+/// Compact, interactive terminal launcher placed to the left of the MacBook
+/// notch. This is deliberately independent from the right-side live-activity
+/// widget so either feature can be enabled without the other.
+final class NotchTerminalMenuController: NSObject {
+    private struct Widget {
+        let panel: NSPanel
+        let button: NSButton
+    }
+
+    var makeMenu: (() -> NSMenu)?
+    private var widgets: [Widget] = []
+
+    func show(display: String) {
+        hide()
+        let screens = NSScreen.screens
+        guard !screens.isEmpty else { return }
+        let builtin = screens.filter { $0.safeAreaInsets.top > 0 }
+        let external = screens.filter { $0.safeAreaInsets.top <= 0 }
+
+        let targets: [NSScreen]
+        switch display {
+        case "external":
+            targets = external.isEmpty ? screens : external
+        case "primary", "focused":
+            targets = [NSScreen.main ?? screens[0]]
+        case "all", "both":
+            targets = screens
+        default:
+            targets = builtin.isEmpty ? [NSScreen.main ?? screens[0]] : builtin
+        }
+
+        widgets = targets.map(makeWidget)
+    }
+
+    func hide() {
+        for widget in widgets { widget.panel.orderOut(nil) }
+        widgets.removeAll()
+    }
+
+    private func makeWidget(on screen: NSScreen) -> Widget {
+        let frame = NotchTerminalMenuLayout.frame(
+            in: screen.frame,
+            safeAreaTop: screen.safeAreaInsets.top)
+        let panel = NSPanel(
+            contentRect: frame,
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false)
+        panel.level = .statusBar
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.hidesOnDeactivate = false
+        panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
+
+        let button = NSButton(frame: NSRect(origin: .zero, size: frame.size))
+        button.target = self
+        button.action = #selector(showTerminalMenu(_:))
+        button.isBordered = false
+        button.imagePosition = .imageOnly
+        button.contentTintColor = .white
+        button.toolTip = "Infinitty Terminals"
+        button.image = NSImage(
+            systemSymbolName: "terminal",
+            accessibilityDescription: "Infinitty Terminals")
+        if button.image == nil {
+            button.title = ">_"
+            button.imagePosition = .noImage
+            button.font = .monospacedSystemFont(ofSize: 12, weight: .semibold)
+        }
+
+        let content = NSView(frame: button.frame)
+        content.wantsLayer = true
+        content.layer?.backgroundColor = NSColor.black.cgColor
+        content.layer?.cornerRadius = 8
+        content.addSubview(button)
+        panel.contentView = content
+        panel.orderFrontRegardless()
+        return Widget(panel: panel, button: button)
+    }
+
+    @objc private func showTerminalMenu(_ sender: NSButton) {
+        guard let menu = makeMenu?(), !menu.items.isEmpty else { return }
+        menu.popUp(
+            positioning: nil,
+            at: NSPoint(x: 0, y: sender.bounds.minY),
+            in: sender)
+    }
+}

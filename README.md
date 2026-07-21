@@ -225,8 +225,12 @@ Font to use one everywhere.
   submenu, restore it as the last Quick Terminal tab, in a new standard window,
   or as the last tab in the current standard window. infinitty stays resident
   while detached terminals are running, and exited panes or terminals disappear
-  from the menu automatically. Code View is window-scoped and closes when its
-  terminal is moved or detached.
+  from the menu automatically. With `notch-terminal-menu = true`, the compact
+  terminal icon to the left of the notch groups Quick Terminal tabs, standard
+  windows, and detached terminals. Selecting a detached item opens it in a
+  temporary floating panel; when that panel loses focus, the live terminal
+  returns to Detached. Code View is window-scoped and closes when its terminal
+  is moved or detached.
 - **Splits**: ⌘D split right, ⇧⌘D split down, arbitrarily nested; ⌘W closes
   the focused pane (tab closes when its last pane exits); ⇧⌥←/→/↑/↓ focuses
   and briefly highlights the nearest pane in that direction; hold ⇧⌥ to reveal
@@ -278,6 +282,7 @@ Font to use one everywhere.
 - **Agent glow**: a pulsing inner border while an agent drives the pane over
   the control socket (disable with `agent-glow = false`)
 - **Notch widget placement**: `notch-display = builtin | external | primary | all`
+  applies to both independently enabled notch features
 
 ### Settings, window chrome, pets
 
@@ -292,6 +297,9 @@ Font to use one everywhere.
   while output flows
 - **Notch live activity**: `notch = true` shows a slim strip beside the
   MacBook notch with the running command and its exit status (OSC 133)
+- **Notch terminal menu**: `notch-terminal-menu = true` independently shows a
+  compact terminal icon to the left of the notch for focusing Quick Terminal
+  tabs and standard windows or temporarily previewing detached terminals
 
 ## Terminal feature coverage
 

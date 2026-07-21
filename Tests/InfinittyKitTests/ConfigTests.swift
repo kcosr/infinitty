@@ -49,4 +49,22 @@ final class ConfigTests: XCTestCase {
         reparsed.apply(fileContents: config.serialize())
         XCTAssertEqual(reparsed.palette, config.palette)
     }
+
+    func testNotchTerminalMenuConfigIsIndependentFromLiveActivity() {
+        var config = AppConfig()
+        config.notch = false
+        config.notchTerminalMenu = true
+        config.notchDisplay = "external"
+
+        let serialized = config.serialize()
+        XCTAssertTrue(serialized.contains("notch-terminal-menu = true"))
+        XCTAssertTrue(serialized.contains("notch-display = external"))
+        XCTAssertFalse(serialized.contains("\nnotch = true"))
+
+        var reparsed = AppConfig()
+        reparsed.apply(fileContents: serialized)
+        XCTAssertFalse(reparsed.notch)
+        XCTAssertTrue(reparsed.notchTerminalMenu)
+        XCTAssertEqual(reparsed.notchDisplay, "external")
+    }
 }

@@ -149,6 +149,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private var reloadPending = false
     private var settings: SettingsWindowController?
     private let notch = NotchActivityController()
+    private let notchTerminalMenu = NotchTerminalMenuController()
+    private let detachedPreview = DetachedTerminalPreviewController()
     private let appControl = AppControlServer()
     private var runWaiters: [Int: [(Int) -> Void]] = [:] // session id -> completions
     private let updater = Updater()
@@ -225,7 +227,18 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         launchCompleted = true
         watchConfigFile()
         configureQuickTerminalHotKey()
+        notchTerminalMenu.makeMenu = { [weak self] in
+            self?.buildNotchTerminalMenu() ?? NSMenu()
+        }
+        detachedPreview.onDismiss = { [weak self] in
+            self?.refreshDetachedTerminalsMenu()
+            self?.refreshPets()
+            self?.refreshShortcutHints()
+        }
         if config.notch { notch.show(display: config.notchDisplay) }
+        if config.notchTerminalMenu {
+            notchTerminalMenu.show(display: config.notchDisplay)
+        }
         if ProcessInfo.processInfo.environment["INFINITTY_SHOW_SETTINGS"] != nil {
             openSettings(nil) // UI testing hook
         }
@@ -360,6 +373,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         if let tabContextMenuMonitor { NSEvent.removeMonitor(tabContextMenuMonitor) }
         if let modifierHintMonitor { NSEvent.removeMonitor(modifierHintMonitor) }
         if let paneShortcutKeyMonitor { NSEvent.removeMonitor(paneShortcutKeyMonitor) }
+        notchTerminalMenu.hide()
+        detachedPreview.dismiss()
         appControl.stop()
         for s in sessions { s.shutdown() }
     }
@@ -387,9 +402,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             }
             self.quickTerminal.setTitle(session.title, for: session)
             self.updateTitle(for: win)
+            if win === self.detachedPreview.window {
+                self.refreshDetachedTerminalsMenu()
+            }
         }
         s.view.onFocus = { [weak self, weak s] in
             guard let s, let win = s.view.window else { return }
+            if let detached = self?.detachedPreview.detached,
+               detached.contains(s.view) {
+                detached.preferredFocus = s.view
+            }
             self?.quickTerminal.setFocusedSession(s)
             self?.updateTitle(for: win)
             self?.codeViews[ObjectIdentifier(win)]?.track(session: s)
@@ -689,6 +711,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private func updateTitle(for win: NSWindow) {
         let inWindow = activeSessions(in: win)
         guard !inWindow.isEmpty else { return }
+        if win === detachedPreview.window, let detached = detachedPreview.detached {
+            win.title = detached.displayTitle(sessions: sessions(in: detached))
+            win.subtitle = ""
+            return
+        }
         if win === quickTerminal.window {
             let focused = inWindow.first { win.firstResponder === $0.view } ?? inWindow[0]
             quickTerminal.setTitle(focused.title, for: focused)
@@ -856,9 +883,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         if let detached {
             let remaining = sessions(in: detached)
             if remaining.isEmpty {
+                _ = detachedPreview.dismiss(ifPresenting: detached)
                 detachedTerminals.removeAll { $0 === detached }
             } else {
                 detached.removePane(v)
+                if detachedPreview.detached === detached {
+                    detachedPreview.refreshRoot()
+                }
             }
             refreshDetachedTerminalsMenu()
             refreshPets()
@@ -1232,6 +1263,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             splitView.addArrangedSubview(old)
             splitView.addArrangedSubview(newSession.view)
         }
+        if win === detachedPreview.window,
+           let detached = detachedPreview.detached,
+           detached.rootView === old {
+            detached.rootView = splitView
+        }
 
         DispatchQueue.main.async {
             let mid = vertical ? splitView.bounds.width / 2 : splitView.bounds.height / 2
@@ -1262,6 +1298,125 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     @objc func toggleQuickTerminal(_ sender: Any?) {
         quickTerminal.toggle()
+    }
+
+    // MARK: - notch terminal menu
+
+    private func buildNotchTerminalMenu() -> NSMenu {
+        let menu = NSMenu(title: "Infinitty Terminals")
+
+        let quickMenu = NSMenu(title: "Quick Terminal")
+        for summary in quickTerminal.tabSummaries {
+            let item = quickMenu.addItem(
+                withTitle: summary.title,
+                action: #selector(focusNotchQuickTab(_:)),
+                keyEquivalent: "")
+            item.target = self
+            item.representedObject = summary.id.rawValue.uuidString
+        }
+        addEmptyPlaceholder(to: quickMenu, title: "No Quick Tabs")
+        addNotchMenuGroup(title: "Quick Terminal", submenu: quickMenu, to: menu)
+
+        let windowsMenu = NSMenu(title: "Windows")
+        for window in notchStandardWindows {
+            let item = windowsMenu.addItem(
+                withTitle: window.title.isEmpty ? "Terminal" : window.title,
+                action: #selector(focusNotchStandardTerminal(_:)),
+                keyEquivalent: "")
+            item.target = self
+            item.representedObject = window
+        }
+        addEmptyPlaceholder(to: windowsMenu, title: "No Windows")
+        addNotchMenuGroup(title: "Windows", submenu: windowsMenu, to: menu)
+
+        let detachedMenu = NSMenu(title: "Detached")
+        for detached in detachedTerminals {
+            let item = detachedMenu.addItem(
+                withTitle: detached.displayTitle(sessions: sessions(in: detached)),
+                action: #selector(previewNotchDetachedTerminal(_:)),
+                keyEquivalent: "")
+            item.target = self
+            item.representedObject = detached.id.uuidString
+        }
+        addEmptyPlaceholder(to: detachedMenu, title: "No Detached Terminals")
+        addNotchMenuGroup(title: "Detached", submenu: detachedMenu, to: menu)
+        return menu
+    }
+
+    private func addNotchMenuGroup(title: String, submenu: NSMenu, to menu: NSMenu) {
+        let parent = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        parent.submenu = submenu
+        menu.addItem(parent)
+    }
+
+    private func addEmptyPlaceholder(to menu: NSMenu, title: String) {
+        guard menu.items.isEmpty else { return }
+        let empty = menu.addItem(withTitle: title, action: nil, keyEquivalent: "")
+        empty.isEnabled = false
+    }
+
+    private var notchStandardWindows: [NSWindow] {
+        var result: [NSWindow] = []
+        var seen = Set<ObjectIdentifier>()
+        for seed in NSApp.orderedWindows + NSApp.windows {
+            guard seed.tabbingIdentifier == "infinitty",
+                  seed !== quickTerminal.window else { continue }
+            for window in seed.tabbedWindows ?? [seed] {
+                let id = ObjectIdentifier(window)
+                guard window.tabbingIdentifier == "infinitty",
+                      window !== quickTerminal.window,
+                      !seen.contains(id),
+                      !activeSessions(in: window).isEmpty else { continue }
+                seen.insert(id)
+                result.append(window)
+            }
+        }
+        return result
+    }
+
+    @objc private func focusNotchQuickTab(_ sender: NSMenuItem) {
+        guard let value = sender.representedObject as? String,
+              let id = UUID(uuidString: value),
+              let summary = quickTerminal.tabSummaries.first(where: { $0.id.rawValue == id })
+        else { return }
+        _ = quickTerminal.focusTab(id: summary.id)
+    }
+
+    @objc private func focusNotchStandardTerminal(_ sender: NSMenuItem) {
+        guard let window = sender.representedObject as? NSWindow,
+              window.tabbingIdentifier == "infinitty",
+              window !== quickTerminal.window else { return }
+        window.tabGroup?.selectedWindow = window
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        if !(window.firstResponder is TerminalView),
+           let session = activeSessions(in: window).first {
+            window.makeFirstResponder(session.view)
+        }
+    }
+
+    @objc private func previewNotchDetachedTerminal(_ sender: NSMenuItem) {
+        guard let detached = detachedTerminal(from: sender) else { return }
+        presentDetachedPreview(detached)
+    }
+
+    private func presentDetachedPreview(_ detached: DetachedTerminal) {
+        let containedSessions = sessions(in: detached)
+        guard let representative = detached.preferredFocus.flatMap({ focused in
+            containedSessions.first { $0.view === focused }
+        }) ?? containedSessions.first else { return }
+        let title = detached.displayTitle(sessions: containedSessions)
+        let window = detachedPreview.present(detached, title: title)
+        applyWindowBacking(to: window, renderer: representative.renderer)
+        window.contentResizeIncrements = representative.renderer.cellSizePoints
+        let preferredFocus = detached.preferredFocus ?? representative.view
+        window.makeFirstResponder(preferredFocus)
+        refreshRestoredGeometry(
+            in: window,
+            sessions: containedSessions,
+            preferredFocus: preferredFocus)
+        refreshPets()
+        refreshShortcutHints()
     }
 
     // MARK: - detached terminals
@@ -1360,7 +1515,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     @objc private func restoreDetachedInQuickTerminal(_ sender: Any?) {
-        guard let detached = detachedTerminal(from: sender), quickTerminal.adopt(detached) else {
+        guard let detached = detachedTerminal(from: sender) else { return }
+        _ = detachedPreview.dismiss(ifPresenting: detached)
+        guard quickTerminal.adopt(detached) else {
             return
         }
         finishRestoring(detached)
@@ -1394,6 +1551,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         _ detached: DetachedTerminal,
         asTabIn host: NSWindow?
     ) -> Bool {
+        _ = detachedPreview.dismiss(ifPresenting: detached)
         let containedSessions = sessions(in: detached)
         guard let representative = detached.preferredFocus.flatMap({ focused in
             containedSessions.first { $0.view === focused }
@@ -1453,6 +1611,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     private func finishRestoring(_ detached: DetachedTerminal) {
+        _ = detachedPreview.dismiss(ifPresenting: detached)
         detachedTerminals.removeAll { $0 === detached }
         refreshDetachedTerminalsMenu()
         refreshPets()
@@ -1875,6 +2034,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         if config.controlSockets { appControl.start() }
         refreshPets()
         if config.notch { notch.show(display: config.notchDisplay) } else { notch.hide() }
+        if config.notchTerminalMenu {
+            notchTerminalMenu.show(display: config.notchDisplay)
+        } else {
+            notchTerminalMenu.hide()
+        }
         watchConfigFile() // re-arm (file may have been atomically replaced)
     }
 

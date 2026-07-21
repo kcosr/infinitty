@@ -45,6 +45,10 @@ final class SettingsWindowController: NSWindowController {
     private let petScaleSlider = NSSlider(value: 0.5, minValue: 0.2, maxValue: 1.2, target: nil, action: nil)
     private let petScaleValue = NSTextField(labelWithString: "")
     private let notchCheck = NSButton(checkboxWithTitle: "Show live activity", target: nil, action: nil)
+    private let notchMenuCheck = NSButton(
+        checkboxWithTitle: "Show terminal menu",
+        target: nil,
+        action: nil)
     private let notchPopup = NSPopUpButton()
     private let fgWell = NSColorWell()
     private let bgWell = NSColorWell()
@@ -55,7 +59,7 @@ final class SettingsWindowController: NSWindowController {
         self.current = config
         self.onSave = onSave
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 480, height: 620),
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 640),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -176,8 +180,13 @@ final class SettingsWindowController: NSWindowController {
             }
         }
 
-        let notchGroup = NSStackView(views: [notchCheck, notchPopup])
+        let notchChecks = NSStackView(views: [notchCheck, notchMenuCheck])
+        notchChecks.orientation = .vertical
+        notchChecks.alignment = .leading
+        notchChecks.spacing = 4
+        let notchGroup = NSStackView(views: [notchChecks, notchPopup])
         notchGroup.orientation = .horizontal
+        notchGroup.alignment = .centerY
         notchGroup.spacing = 10
 
         hintsWarning.stringValue = "⚠ Disable your shell's autosuggestions (zsh-autosuggestions, fish) to avoid overlapping ghost text. Uses on-device Apple Intelligence by default; set an AI endpoint via Edit Config."
@@ -310,6 +319,7 @@ final class SettingsWindowController: NSWindowController {
         glowCheck.state = current.agentGlow ? .on : .off
         hintsCheck.state = current.hints ? .on : .off
         notchCheck.state = current.notch ? .on : .off
+        notchMenuCheck.state = current.notchTerminalMenu ? .on : .off
         titlebarPopup.selectItem(withTitle: current.titlebarStyle)
         lightsPopup.selectItem(withTitle: current.trafficLights)
         notchPopup.selectItem(withTitle: current.notchDisplay)
@@ -390,6 +400,7 @@ final class SettingsWindowController: NSWindowController {
         c.agentGlow = glowCheck.state == .on
         c.hints = hintsCheck.state == .on
         c.notch = notchCheck.state == .on
+        c.notchTerminalMenu = notchMenuCheck.state == .on
         c.notchDisplay = notchPopup.titleOfSelectedItem ?? "builtin"
         c.titlebarStyle = titlebarPopup.titleOfSelectedItem ?? "native"
         c.trafficLights = lightsPopup.titleOfSelectedItem ?? "circle"
