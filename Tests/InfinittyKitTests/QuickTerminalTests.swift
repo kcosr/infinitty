@@ -121,6 +121,25 @@ final class QuickTerminalTests: XCTestCase {
         XCTAssertTrue(second.superview === tabsView.pageHost)
     }
 
+    func testQuickTabDropSlotsResolveAroundRemovedSource() {
+        XCTAssertEqual(QuickTabReordering.destinationIndex(
+            tabCount: 3, sourceIndex: 0, insertionSlot: 0), 0)
+        XCTAssertEqual(QuickTabReordering.destinationIndex(
+            tabCount: 3, sourceIndex: 0, insertionSlot: 1), 0)
+        XCTAssertEqual(QuickTabReordering.destinationIndex(
+            tabCount: 3, sourceIndex: 0, insertionSlot: 2), 1)
+        XCTAssertEqual(QuickTabReordering.destinationIndex(
+            tabCount: 3, sourceIndex: 0, insertionSlot: 3), 2)
+        XCTAssertEqual(QuickTabReordering.destinationIndex(
+            tabCount: 3, sourceIndex: 2, insertionSlot: 0), 0)
+        XCTAssertEqual(QuickTabReordering.destinationIndex(
+            tabCount: 3, sourceIndex: 2, insertionSlot: 2), 2)
+        XCTAssertNil(QuickTabReordering.destinationIndex(
+            tabCount: 3, sourceIndex: 3, insertionSlot: 0))
+        XCTAssertNil(QuickTabReordering.destinationIndex(
+            tabCount: 3, sourceIndex: 0, insertionSlot: 4))
+    }
+
     func testQuickTabStripShowsTitlesAndAddButton() throws {
         let strip = QuickTerminalTabStripView(
             frame: NSRect(x: 0, y: 0, width: 500, height: 34))
@@ -134,6 +153,35 @@ final class QuickTerminalTests: XCTestCase {
         let tabButtons = strip.subviews.compactMap { $0 as? NSButton }
             .filter { $0.title != "+" && $0.title != "×" }
         XCTAssertEqual(tabButtons.map(\.alignment), [.center, .center])
+        XCTAssertTrue(tabButtons.allSatisfy { button in
+            button.gestureRecognizers.contains { $0 is NSPanGestureRecognizer }
+        })
+        strip.setDragHighlighted(true, for: tabButtons[0])
+        let draggedButton = try XCTUnwrap(tabButtons[0] as? QuickTerminalTabButton)
+        XCTAssertEqual(
+            Double(try XCTUnwrap(draggedButton.dragBackgroundColor?.cgColor).alpha),
+            0.2088,
+            accuracy: 0.001)
+        XCTAssertEqual(
+            Double(try XCTUnwrap(tabButtons[0].layer?.backgroundColor).alpha),
+            0,
+            accuracy: 0.001)
+        XCTAssertEqual(tabButtons[0].layer?.borderWidth, 0)
+        XCTAssertEqual(tabButtons[0].contentTintColor, .labelColor)
+
+        let blueTint = try XCTUnwrap(
+            QuickTabDragAppearance.backgroundColor(accent: .systemBlue)
+                .usingColorSpace(.deviceRGB))
+        XCTAssertGreaterThan(blueTint.blueComponent, blueTint.redComponent)
+        XCTAssertGreaterThan(blueTint.alphaComponent, 0.14)
+        strip.setDragHighlighted(false, for: tabButtons[0])
+        XCTAssertNil(draggedButton.dragBackgroundColor)
+        XCTAssertEqual(
+            Double(try XCTUnwrap(tabButtons[0].layer?.backgroundColor).alpha),
+            0,
+            accuracy: 0.001)
+        XCTAssertEqual(tabButtons[0].layer?.borderWidth, 0)
+        XCTAssertEqual(tabButtons[0].contentTintColor, .secondaryLabelColor)
         XCTAssertEqual(tabButtons[0].frame.width, tabButtons[1].frame.width)
         XCTAssertGreaterThan(tabButtons.reduce(0) { $0 + $1.frame.width }, 400)
         XCTAssertEqual(
@@ -147,6 +195,11 @@ final class QuickTerminalTests: XCTestCase {
         strip.onDetach = { detachedIndex = $0 }
         strip.handleDetachRequest(at: 0)
         XCTAssertEqual(detachedIndex, 0)
+        var reorderedIndices: (Int, Int)?
+        strip.onReorder = { reorderedIndices = ($0, $1) }
+        strip.handleReorderRequest(from: 0, to: 1)
+        XCTAssertEqual(reorderedIndices?.0, 0)
+        XCTAssertEqual(reorderedIndices?.1, 1)
         let close = try XCTUnwrap(
             strip.subviews.compactMap { $0 as? NSButton }.first { $0.title == "×" })
         var closedIndex: Int?
@@ -273,6 +326,19 @@ final class QuickTerminalTests: XCTestCase {
         XCTAssertEqual(controller.activeSessions.map(\.id), [second.id])
         XCTAssertTrue(first.view.window === window)
         XCTAssertTrue(second.view.window === window)
+
+        // Reordering changes navigation order but preserves the selected page
+        // and its live terminal focus by stable tab identity.
+        XCTAssertTrue(controller.reorderTab(from: 1, to: 0))
+        XCTAssertEqual(controller.activeTabID, secondTabID)
+        XCTAssertEqual(controller.activeSessions.map(\.id), [second.id])
+        XCTAssertTrue(controller.selectTab(shortcutNumber: 2))
+        XCTAssertEqual(controller.activeTabID, firstTabID)
+        XCTAssertEqual(controller.activeSessions.map(\.id), [first.id])
+        XCTAssertTrue(controller.reorderTab(from: 0, to: 1))
+        XCTAssertEqual(controller.activeTabID, firstTabID)
+        XCTAssertFalse(controller.reorderTab(from: 0, to: 0))
+        XCTAssertFalse(controller.reorderTab(from: -1, to: 0))
 
         XCTAssertTrue(controller.selectTab(containing: first))
         XCTAssertEqual(controller.activeSessions.map(\.id), [first.id])
