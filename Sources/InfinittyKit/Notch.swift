@@ -135,13 +135,24 @@ final class NotchActivityController {
 
 struct NotchTerminalMenuLayout {
     static let width: CGFloat = 34
+    static let activityWidth: CGFloat = 300
+    static let activityGap: CGFloat = 6
 
-    static func frame(in screenFrame: NSRect, safeAreaTop: CGFloat) -> NSRect {
+    static func frame(
+        in screenFrame: NSRect,
+        safeAreaTop: CGFloat,
+        avoidingActivity: Bool = false
+    ) -> NSRect {
         let hasNotch = safeAreaTop > 0
         let height = hasNotch ? max(safeAreaTop, 30) : 26
-        let x = hasNotch
-            ? screenFrame.midX - 110 - width
-            : screenFrame.midX - width / 2
+        let x: CGFloat
+        if hasNotch {
+            x = screenFrame.midX - 110 - width
+        } else if avoidingActivity {
+            x = screenFrame.midX - activityWidth / 2 - activityGap - width
+        } else {
+            x = screenFrame.midX - width / 2
+        }
         return NSRect(
             x: x,
             y: screenFrame.maxY - height,
@@ -161,9 +172,36 @@ final class NotchTerminalMenuController: NSObject {
 
     var makeMenu: (() -> NSMenu)?
     private var widgets: [Widget] = []
+    private var requestedDisplay: String?
+    private var avoidsActivity = false
 
-    func show(display: String) {
-        hide()
+    override init() {
+        super.init()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(screenParametersDidChange(_:)),
+            name: NSApplication.didChangeScreenParametersNotification,
+            object: nil)
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    func show(display: String, avoidingActivity: Bool = false) {
+        requestedDisplay = display
+        avoidsActivity = avoidingActivity
+        rebuildWidgets()
+    }
+
+    func hide() {
+        requestedDisplay = nil
+        removeWidgets()
+    }
+
+    private func rebuildWidgets() {
+        removeWidgets()
+        guard let display = requestedDisplay else { return }
         let screens = NSScreen.screens
         guard !screens.isEmpty else { return }
         let builtin = screens.filter { $0.safeAreaInsets.top > 0 }
@@ -181,18 +219,19 @@ final class NotchTerminalMenuController: NSObject {
             targets = builtin.isEmpty ? [NSScreen.main ?? screens[0]] : builtin
         }
 
-        widgets = targets.map(makeWidget)
+        widgets = targets.map { makeWidget(on: $0, avoidingActivity: avoidsActivity) }
     }
 
-    func hide() {
+    private func removeWidgets() {
         for widget in widgets { widget.panel.orderOut(nil) }
         widgets.removeAll()
     }
 
-    private func makeWidget(on screen: NSScreen) -> Widget {
+    private func makeWidget(on screen: NSScreen, avoidingActivity: Bool) -> Widget {
         let frame = NotchTerminalMenuLayout.frame(
             in: screen.frame,
-            safeAreaTop: screen.safeAreaInsets.top)
+            safeAreaTop: screen.safeAreaInsets.top,
+            avoidingActivity: avoidingActivity)
         let panel = NSPanel(
             contentRect: frame,
             styleMask: [.borderless, .nonactivatingPanel],
@@ -229,6 +268,10 @@ final class NotchTerminalMenuController: NSObject {
         panel.contentView = content
         panel.orderFrontRegardless()
         return Widget(panel: panel, button: button)
+    }
+
+    @objc private func screenParametersDidChange(_ notification: Notification) {
+        rebuildWidgets()
     }
 
     @objc private func showTerminalMenu(_ sender: NSButton) {
