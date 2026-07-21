@@ -1377,15 +1377,47 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         if let host {
             if let group = host.tabGroup {
                 group.addWindow(window) // AppKit appends to the trailing edge.
+                group.selectedWindow = window
             } else {
                 host.addTabbedWindow(window, ordered: .above)
             }
         }
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
-        window.makeFirstResponder(detached.preferredFocus ?? representative.view)
+        let preferredFocus = detached.preferredFocus ?? representative.view
+        window.makeFirstResponder(preferredFocus)
         updateTitle(for: window)
+        // Native tab attachment resizes the adopted window and can assign its
+        // backing scale only after this event turn. Force one post-attachment
+        // geometry pass so Metal does not briefly render the old quick-panel
+        // grid at a tiny scale until the first click triggers layout.
+        DispatchQueue.main.async { [weak self, weak window, weak preferredFocus] in
+            guard let self, let window else { return }
+            self.refreshRestoredGeometry(
+                in: window,
+                sessions: containedSessions,
+                preferredFocus: preferredFocus)
+        }
         return true
+    }
+
+    private func refreshRestoredGeometry(
+        in window: NSWindow,
+        sessions restoredSessions: [TerminalSession],
+        preferredFocus: TerminalView?
+    ) {
+        let scale = window.backingScaleFactor
+        for session in restoredSessions {
+            session.renderer.updateScale(scale)
+            session.view.needsLayout = true
+        }
+        window.contentView?.needsLayout = true
+        window.contentView?.layoutSubtreeIfNeeded()
+        for session in restoredSessions {
+            session.view.layoutSubtreeIfNeeded()
+            session.terminal.touch()
+        }
+        if let preferredFocus { window.makeFirstResponder(preferredFocus) }
     }
 
     private func finishRestoring(_ detached: DetachedTerminal) {
