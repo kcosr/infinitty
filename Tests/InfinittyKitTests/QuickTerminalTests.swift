@@ -39,6 +39,10 @@ final class QuickTerminalTests: XCTestCase {
             hasRegisteredHotKey: true, hasLiveSession: false))
         XCTAssertFalse(QuickTerminalResidency.shouldTerminateAfterLastWindowClosed(
             hasRegisteredHotKey: false, hasLiveSession: true))
+        XCTAssertFalse(QuickTerminalResidency.shouldTerminateAfterLastWindowClosed(
+            hasRegisteredHotKey: false,
+            hasLiveSession: false,
+            hasDetachedTerminal: true))
     }
 
     func testQuickTerminalHeightStateDefaultsAndPersistsFraction() {
@@ -132,6 +136,11 @@ final class QuickTerminalTests: XCTestCase {
         XCTAssertEqual(tabButtons.map(\.alignment), [.center, .center])
         XCTAssertEqual(tabButtons[0].frame.width, tabButtons[1].frame.width)
         XCTAssertGreaterThan(tabButtons.reduce(0) { $0 + $1.frame.width }, 400)
+        XCTAssertEqual(tabButtons[0].menu?.items.map(\.title), ["Detach"])
+        var detachedIndex: Int?
+        strip.onDetach = { detachedIndex = $0 }
+        strip.handleDetachRequest(at: 0)
+        XCTAssertEqual(detachedIndex, 0)
         let close = try XCTUnwrap(
             strip.subviews.compactMap { $0 as? NSButton }.first { $0.title == "×" })
         var closedIndex: Int?
@@ -265,6 +274,16 @@ final class QuickTerminalTests: XCTestCase {
         XCTAssertEqual(controller.baseTitle(for: secondTabID), "Project Two")
         controller.setCustomTitle(nil, for: firstTabID)
         XCTAssertEqual(controller.baseTitle(for: firstTabID), "changed automatically")
+
+        let detached = try XCTUnwrap(controller.detachTab(at: 1))
+        XCTAssertEqual(controller.tabCount, 1)
+        XCTAssertTrue(detached.contains(second.view))
+        XCTAssertNil(second.view.window)
+        XCTAssertTrue(controller.adopt(detached))
+        XCTAssertEqual(controller.tabCount, 2)
+        XCTAssertEqual(controller.activeSessions.map(\.id), [second.id])
+        XCTAssertTrue(second.view.window === window)
+
         XCTAssertFalse(controller.removeTab(containing: second))
         XCTAssertEqual(controller.tabCount, 1)
         XCTAssertEqual(controller.activeSessions.map(\.id), [first.id])
@@ -272,6 +291,48 @@ final class QuickTerminalTests: XCTestCase {
         XCTAssertTrue(controller.removeTab(containing: first))
         XCTAssertEqual(controller.tabCount, 0)
         XCTAssertNil(controller.window)
+    }
+
+    func testDetachedTreeCanCreateFirstQuickTerminalTabWithoutLaunchingShell() throws {
+        _ = NSApplication.shared
+        let session = TerminalSession(config: AppConfig(), scale: 2)
+        session.view.frame = NSRect(x: 0, y: 0, width: 800, height: 400)
+        var adoptedWindow: NSWindow?
+        var launches = 0
+        let controller = QuickTerminalController(
+            config: AppConfig(),
+            makeWindow: { nil },
+            makeAdoptedWindow: { content, _ in
+                let window = QuickTerminalPanel(
+                    contentRect: content.frame,
+                    styleMask: [.borderless, .resizable],
+                    backing: .buffered,
+                    defer: false)
+                window.contentView = content
+                adoptedWindow = window
+                return window
+            },
+            makeTab: { _ in nil },
+            sessionsInPage: { page in
+                session.view === page || session.view.isDescendant(of: page)
+                    ? [session]
+                    : []
+            },
+            launchSession: { _ in launches += 1 })
+        defer {
+            controller.lastSessionDidExit()
+            session.shutdown()
+        }
+        let detached = DetachedTerminal(
+            rootView: session.view,
+            customTitle: "Adopted",
+            preferredFocus: session.view)
+
+        XCTAssertTrue(controller.adopt(detached))
+        XCTAssertEqual(controller.tabCount, 1)
+        XCTAssertEqual(controller.baseTitle(for: try XCTUnwrap(controller.activeTabID)), "Adopted")
+        XCTAssertTrue(session.view.window === adoptedWindow)
+        XCTAssertEqual(launches, 0)
     }
 
     func testConfigSerializationPreservesQuickTerminalSettings() {

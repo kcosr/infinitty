@@ -11,6 +11,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     override public init() {
         super.init()
         installTitlebarDoubleClickMonitor()
+        installTerminalTabContextMenuMonitor()
         installModifierHintMonitor()
     }
 
@@ -48,6 +49,45 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                   self.eventIsInTitlebar(event, of: sourceWindow)
             else { return event }
             self.beginInlineRename(for: sourceWindow)
+            return nil
+        }
+    }
+
+    /// Native AppKit tab buttons do not expose a public contextual-menu hook.
+    /// Reuse the guarded tab hit-testing used by rename and present our own
+    /// menu for the clicked standard tab. A lone window has no visible tab
+    /// button, so its titlebar serves as the equivalent target.
+    private func installTerminalTabContextMenuMonitor() {
+        tabContextMenuMonitor = NSEvent.addLocalMonitorForEvents(matching: .rightMouseDown) {
+            [weak self] event in
+            guard let self,
+                  let sourceWindow = event.window,
+                  sourceWindow.tabbingIdentifier == "infinitty",
+                  sourceWindow !== self.quickTerminal.window
+            else { return event }
+
+            let screenPoint = sourceWindow.convertPoint(toScreen: event.locationInWindow)
+            let target: NSWindow
+            if let hit = sourceWindow.nativeTabButton(atScreenPoint: screenPoint),
+               let tabs = sourceWindow.tabbedWindows,
+               tabs.indices.contains(hit.index) {
+                target = tabs[hit.index]
+            } else {
+                guard sourceWindow.nativeTabButtonsInVisualOrder().isEmpty,
+                      self.eventIsInTitlebar(event, of: sourceWindow)
+                else { return event }
+                target = sourceWindow
+            }
+
+            let menu = NSMenu()
+            let detach = menu.addItem(
+                withTitle: "Detach",
+                action: #selector(AppDelegate.detachStandardTerminal(_:)),
+                keyEquivalent: "")
+            detach.target = self
+            detach.representedObject = target
+            guard let hostView = sourceWindow.contentView else { return event }
+            NSMenu.popUpContextMenu(menu, with: event, for: hostView)
             return nil
         }
     }
@@ -106,12 +146,20 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private var runWaiters: [Int: [(Int) -> Void]] = [:] // session id -> completions
     private let updater = Updater()
     private var updateIndicators: [ObjectIdentifier: UpdateIndicatorView] = [:]
+    private var detachedTerminals: [DetachedTerminal] = []
+    private var detachmentInProgress = false
     private var quickTerminalHotKey: GlobalHotKey?
     private lazy var quickTerminal: QuickTerminalController = {
         let controller = QuickTerminalController(
             config: config,
             makeWindow: { [weak self] in
                 self?.makeTerminalWindow(role: .quickTerminal)
+            },
+            makeAdoptedWindow: { [weak self] content, session in
+                self?.makeTerminalWindowHosting(
+                    content: content,
+                    representativeSession: session,
+                    role: .quickTerminal)
             },
             makeTab: { [weak self] window in
                 self?.makeQuickTerminalTabContent(in: window)
@@ -127,6 +175,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             self.refreshPets()
             self.refreshShortcutHints()
         }
+        controller.onTabDetached = { [weak self] detached in
+            guard let self else { return }
+            self.detachedTerminals.append(detached)
+            self.refreshDetachedTerminalsMenu()
+            self.refreshPets()
+            self.refreshShortcutHints()
+        }
         return controller
     }()
     /// Currently visible rename UI, if any. Capped to one at a time so the
@@ -134,6 +189,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private var activeRename: TabRenameField?
     /// Local mouse monitor that turns titlebar double-clicks into inline rename.
     private var titlebarClickMonitor: Any?
+    private var tabContextMenuMonitor: Any?
     private var modifierHintMonitor: Any?
     private var paneShortcutKeyMonitor: Any?
     private var commandModifierHeld = false
@@ -251,7 +307,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         // the menu or socket rather than a registered global shortcut.
         QuickTerminalResidency.shouldTerminateAfterLastWindowClosed(
             hasRegisteredHotKey: quickTerminalHotKey != nil,
-            hasLiveSession: quickTerminal.hasLiveSession)
+            hasLiveSession: quickTerminal.hasLiveSession,
+            hasDetachedTerminal: detachmentInProgress || !detachedTerminals.isEmpty)
     }
 
     public func applicationShouldHandleReopen(
@@ -289,6 +346,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         pendingTabHint?.cancel()
         pendingPaneHint?.cancel()
         if let titlebarClickMonitor { NSEvent.removeMonitor(titlebarClickMonitor) }
+        if let tabContextMenuMonitor { NSEvent.removeMonitor(tabContextMenuMonitor) }
         if let modifierHintMonitor { NSEvent.removeMonitor(modifierHintMonitor) }
         if let paneShortcutKeyMonitor { NSEvent.removeMonitor(paneShortcutKeyMonitor) }
         appControl.stop()
@@ -308,10 +366,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
         s.onExited = { [weak self] session in self?.sessionDidExit(session) }
         s.onTitleChanged = { [weak self] session in
-            guard let win = session.view.window else { return }
-            self?.quickTerminal.setTitle(session.title, for: session)
-            self?.updateTitle(for: win)
-            self?.appControl.broadcast(["event": "title", "pane": session.id, "title": session.title])
+            guard let self else { return }
+            self.appControl.broadcast([
+                "event": "title", "pane": session.id, "title": session.title,
+            ])
+            guard let win = session.view.window else {
+                self.refreshDetachedTerminalsMenu()
+                return
+            }
+            self.quickTerminal.setTitle(session.title, for: session)
+            self.updateTitle(for: win)
         }
         s.view.onFocus = { [weak self, weak s] in
             guard let s, let win = s.view.window else { return }
@@ -359,6 +423,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private func activeSessions(in win: NSWindow) -> [TerminalSession] {
         if win === quickTerminal.window { return quickTerminal.activeSessions }
         return sessions.filter { $0.view.window === win }
+    }
+
+    private func sessions(in detached: DetachedTerminal) -> [TerminalSession] {
+        sessions.filter { detached.contains($0.view) }
+    }
+
+    private func detachedTerminal(containing session: TerminalSession) -> DetachedTerminal? {
+        detachedTerminals.first { $0.contains(session.view) }
     }
 
     /// Bring `session`'s pane to the front within its window and make it first
@@ -756,6 +828,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     private func sessionDidExit(_ s: TerminalSession) {
         let wasQuickTerminal = quickTerminal.contains(s)
+        let detached = detachedTerminal(containing: s)
         let quickTabWasActive = wasQuickTerminal
             && quickTerminal.activeSessions.contains { $0 === s }
         let quickTabSessions = wasQuickTerminal
@@ -768,6 +841,19 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         appControl.broadcast(["event": "pane-closed", "pane": s.id])
         runWaiters.removeValue(forKey: s.id)?.forEach { $0(-1) }
         let v = s.view
+
+        if let detached {
+            let remaining = sessions(in: detached)
+            if remaining.isEmpty {
+                detachedTerminals.removeAll { $0 === detached }
+            } else {
+                detached.removePane(v)
+            }
+            refreshDetachedTerminalsMenu()
+            refreshPets()
+            refreshShortcutHints()
+            return
+        }
         guard let win else { return }
 
         if wasQuickTerminal, quickTabSessions.count == 1 {
@@ -846,13 +932,42 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         let scale = NSScreen.main?.backingScaleFactor ?? 2
         let session = createSession(scale: scale)
         session.workingDirectory = cwd
-
         let cell = session.renderer.cellSizePoints
         let inset = session.renderer.insetPoints
         let contentSize = NSSize(
             width: CGFloat(120) * cell.width + inset * 2,
             height: CGFloat(32) * cell.height + inset * 2
         )
+        session.view.frame = NSRect(origin: .zero, size: contentSize)
+        session.view.autoresizingMask = [.width, .height]
+        let content: NSView = config.backgroundBlur
+            ? wrapInBackgroundBlur(session.view)
+            : session.view
+        let window = makeTerminalWindowHosting(
+            content: content,
+            representativeSession: session,
+            role: role)
+        return (window, session)
+    }
+
+    /// Build only the appropriate AppKit window shell around an existing live
+    /// terminal tree. This is the bridge used when a detached item is restored
+    /// across standard-window and quick-terminal modes.
+    private func makeTerminalWindowHosting(
+        content: NSView,
+        representativeSession session: TerminalSession,
+        role: TerminalWindowRole
+    ) -> NSWindow {
+        let cell = session.renderer.cellSizePoints
+        let inset = session.renderer.insetPoints
+        let fallbackSize = NSSize(
+            width: CGFloat(120) * cell.width + inset * 2,
+            height: CGFloat(32) * cell.height + inset * 2)
+        let contentSize = content.bounds.width > 1 && content.bounds.height > 1
+            ? content.bounds.size
+            : fallbackSize
+        content.frame = NSRect(origin: .zero, size: contentSize)
+        content.autoresizingMask = [.width, .height]
         let contentRect = NSRect(origin: .zero, size: contentSize)
         let window: NSWindow
         switch role {
@@ -899,11 +1014,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         // Top inset is derived per-layout from contentLayoutRect in
         // TerminalView.updateGeometry (tracks titlebar + tab bar).
 
-        session.view.frame = NSRect(origin: .zero, size: contentSize)
-        session.view.autoresizingMask = [.width, .height]
-        window.contentView = config.backgroundBlur
-            ? wrapInBackgroundBlur(session.view)
-            : session.view
+        window.contentView = content
 
         if customLights, let shape = TrafficLightsView.Shape(rawValue: config.trafficLights) {
             let lights = TrafficLightsView(shape: shape)
@@ -933,7 +1044,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             tabIconAccessories[ObjectIdentifier(window)] = acc
         }
 
-        return (window, session)
+        return window
     }
 
     /// Creates a page payload for the existing quick-terminal panel. The
@@ -1142,6 +1253,226 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         quickTerminal.toggle()
     }
 
+    // MARK: - detached terminals
+
+    private static let detachedTerminalsMenuTag = 27_101
+
+    private var currentStandardWindow: NSWindow? {
+        guard let window = NSApp.keyWindow,
+              window.tabbingIdentifier == "infinitty",
+              window !== quickTerminal.window
+        else { return nil }
+        return window
+    }
+
+    @objc private func detachStandardTerminal(_ sender: Any?) {
+        guard let item = sender as? NSMenuItem,
+              let window = item.representedObject as? NSWindow,
+              window.tabbingIdentifier == "infinitty",
+              window !== quickTerminal.window,
+              !activeSessions(in: window).isEmpty
+        else { return }
+
+        activeRename?.dismiss(committed: false)
+        activeRename = nil
+        let id = ObjectIdentifier(window)
+        let customTitle = titleOverrides[id]
+        let preferredFocus = window.firstResponder as? TerminalView
+        detachmentInProgress = true
+        defer { detachmentInProgress = false }
+        guard let content = takeTerminalContent(from: window) else { return }
+
+        let detached = DetachedTerminal(
+            rootView: content,
+            customTitle: customTitle,
+            preferredFocus: preferredFocus)
+        detachedTerminals.append(detached)
+        refreshDetachedTerminalsMenu()
+        refreshPets()
+        refreshShortcutHints()
+    }
+
+    /// Strip window-only UI before retaining the live terminal tree. Code View
+    /// and titlebar accessories are deliberately not carried into quick mode.
+    private func takeTerminalContent(from window: NSWindow) -> NSView? {
+        let id = ObjectIdentifier(window)
+        if let controller = codeViews.removeValue(forKey: id),
+           let split = window.contentView as? NSSplitView,
+           let terminalContent = split.arrangedSubviews.first(where: { $0 !== controller.view }) {
+            terminalContent.removeFromSuperview()
+            controller.view.removeFromSuperview()
+            window.contentView = terminalContent
+        }
+        guard let content = window.contentView else { return nil }
+        removeEmbeddedWindowChrome(from: content)
+        window.contentView = nil
+        titleOverrides.removeValue(forKey: id)
+        tabIconAccessories.removeValue(forKey: id)?.detach()
+        updateIndicators.removeValue(forKey: id)?.removeFromSuperview()
+        window.subtitle = ""
+        window.delegate = nil
+        window.tabGroup?.removeWindow(window)
+        window.orderOut(nil)
+        window.close()
+        return content
+    }
+
+    private func removeEmbeddedWindowChrome(from view: NSView) {
+        for subview in view.subviews {
+            if subview is TrafficLightsView {
+                subview.removeFromSuperview()
+            } else {
+                removeEmbeddedWindowChrome(from: subview)
+            }
+        }
+    }
+
+    @objc private func restoreDetachedInQuickTerminal(_ sender: Any?) {
+        guard let detached = detachedTerminal(from: sender), quickTerminal.adopt(detached) else {
+            return
+        }
+        finishRestoring(detached)
+    }
+
+    @objc private func restoreDetachedInNewWindow(_ sender: Any?) {
+        guard let detached = detachedTerminal(from: sender),
+              restoreDetached(detached, asTabIn: nil)
+        else { return }
+        finishRestoring(detached)
+    }
+
+    @objc private func restoreDetachedInCurrentWindow(_ sender: Any?) {
+        guard let detached = detachedTerminal(from: sender),
+              let host = currentStandardWindow,
+              restoreDetached(detached, asTabIn: host)
+        else { return }
+        finishRestoring(detached)
+    }
+
+    private func detachedTerminal(from sender: Any?) -> DetachedTerminal? {
+        guard let item = sender as? NSMenuItem,
+              let value = item.representedObject as? String,
+              let id = UUID(uuidString: value)
+        else { return nil }
+        return detachedTerminals.first { $0.id == id }
+    }
+
+    @discardableResult
+    private func restoreDetached(
+        _ detached: DetachedTerminal,
+        asTabIn host: NSWindow?
+    ) -> Bool {
+        let containedSessions = sessions(in: detached)
+        guard let representative = detached.preferredFocus.flatMap({ focused in
+            containedSessions.first { $0.view === focused }
+        }) ?? containedSessions.first else { return false }
+
+        let window = makeTerminalWindowHosting(
+            content: detached.rootView,
+            representativeSession: representative,
+            role: .standard)
+        if let customTitle = detached.customTitle {
+            titleOverrides[ObjectIdentifier(window)] = customTitle
+        }
+        if let host {
+            if let group = host.tabGroup {
+                group.addWindow(window) // AppKit appends to the trailing edge.
+                group.selectedWindow = window
+            } else {
+                host.addTabbedWindow(window, ordered: .above)
+            }
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        let preferredFocus = detached.preferredFocus ?? representative.view
+        window.makeFirstResponder(preferredFocus)
+        updateTitle(for: window)
+        // Native tab attachment resizes the adopted window and can assign its
+        // backing scale only after this event turn. Force one post-attachment
+        // geometry pass so Metal does not briefly render the old quick-panel
+        // grid at a tiny scale until the first click triggers layout.
+        DispatchQueue.main.async { [weak self, weak window, weak preferredFocus] in
+            guard let self, let window else { return }
+            self.refreshRestoredGeometry(
+                in: window,
+                sessions: containedSessions,
+                preferredFocus: preferredFocus)
+        }
+        return true
+    }
+
+    private func refreshRestoredGeometry(
+        in window: NSWindow,
+        sessions restoredSessions: [TerminalSession],
+        preferredFocus: TerminalView?
+    ) {
+        let scale = window.backingScaleFactor
+        for session in restoredSessions {
+            session.renderer.updateScale(scale)
+            session.view.needsLayout = true
+        }
+        window.contentView?.needsLayout = true
+        window.contentView?.layoutSubtreeIfNeeded()
+        for session in restoredSessions {
+            session.view.layoutSubtreeIfNeeded()
+            session.terminal.touch()
+        }
+        if let preferredFocus { window.makeFirstResponder(preferredFocus) }
+    }
+
+    private func finishRestoring(_ detached: DetachedTerminal) {
+        detachedTerminals.removeAll { $0 === detached }
+        refreshDetachedTerminalsMenu()
+        refreshPets()
+        refreshShortcutHints()
+    }
+
+    private func refreshDetachedTerminalsMenu() {
+        guard let windowMenu = NSApp.mainMenu?.items.compactMap(\.submenu)
+                .first(where: { $0.title == "Window" }),
+              let parent = windowMenu.items.first(where: {
+                  $0.tag == Self.detachedTerminalsMenuTag
+              }),
+              let menu = parent.submenu
+        else { return }
+
+        menu.removeAllItems()
+        parent.isHidden = detachedTerminals.isEmpty
+        for detached in detachedTerminals {
+            let item = NSMenuItem(
+                title: detached.displayTitle(sessions: sessions(in: detached)),
+                action: nil,
+                keyEquivalent: "")
+            let choices = NSMenu(title: item.title)
+            let identifier = detached.id.uuidString
+
+            let quick = choices.addItem(
+                withTitle: "Restore in Quick Terminal",
+                action: #selector(restoreDetachedInQuickTerminal(_:)),
+                keyEquivalent: "")
+            quick.target = self
+            quick.representedObject = identifier
+
+            let newWindow = choices.addItem(
+                withTitle: "Restore in New Window",
+                action: #selector(restoreDetachedInNewWindow(_:)),
+                keyEquivalent: "")
+            newWindow.target = self
+            newWindow.representedObject = identifier
+
+            let current = choices.addItem(
+                withTitle: "Restore as Tab in Current Window",
+                action: #selector(restoreDetachedInCurrentWindow(_:)),
+                keyEquivalent: "")
+            current.target = self
+            current.representedObject = identifier
+            current.isEnabled = currentStandardWindow != nil
+
+            item.submenu = choices
+            menu.addItem(item)
+        }
+    }
+
     // MARK: - code view
 
     /// Per-window code-view sidebars, keyed by window identity.
@@ -1238,6 +1569,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     public func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.action == #selector(restoreDetachedInCurrentWindow(_:)) {
+            return currentStandardWindow != nil && detachedTerminal(from: item) != nil
+        }
+        if item.action == #selector(restoreDetachedInQuickTerminal(_:))
+            || item.action == #selector(restoreDetachedInNewWindow(_:)) {
+            return detachedTerminal(from: item) != nil
+        }
         if item.action == #selector(toggleCodeView(_:)) {
             let win = NSApp.keyWindow
             let standard = win.flatMap {
@@ -1374,6 +1712,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             _ = onMain {
                 if self.quickTerminal.contains(s) {
                     _ = self.quickTerminal.focus(s)
+                } else if let detached = self.detachedTerminal(containing: s),
+                          self.restoreDetached(detached, asTabIn: nil) {
+                    self.finishRestoring(detached)
+                    s.view.window?.makeFirstResponder(s.view)
                 } else {
                     s.view.window?.makeKeyAndOrderFront(nil)
                     s.view.window?.makeFirstResponder(s.view)
@@ -1672,6 +2014,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             action: #selector(AppDelegate.toggleCodeView(_:)),
             keyEquivalent: "e")
         codeViewItem.keyEquivalentModifierMask = [.command, .shift]
+
+        let detachedItem = NSMenuItem(
+            title: "Detached Terminals",
+            action: nil,
+            keyEquivalent: "")
+        detachedItem.tag = Self.detachedTerminalsMenuTag
+        detachedItem.submenu = NSMenu(title: "Detached Terminals")
+        detachedItem.isHidden = true
+        windowMenu.addItem(detachedItem)
 
         let focusPaneItem = NSMenuItem(title: "Focus Pane", action: nil, keyEquivalent: "")
         let focusPaneMenu = NSMenu(title: "Focus Pane")
