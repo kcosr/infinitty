@@ -80,6 +80,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             }
 
             let menu = NSMenu()
+            let move = menu.addItem(
+                withTitle: "Move to Quick Terminal",
+                action: #selector(AppDelegate.moveStandardTerminalToQuick(_:)),
+                keyEquivalent: "")
+            move.target = self
+            move.representedObject = target
+            menu.addItem(.separator())
             let detach = menu.addItem(
                 withTitle: "Detach",
                 action: #selector(AppDelegate.detachStandardTerminal(_:)),
@@ -176,11 +183,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             self.refreshShortcutHints()
         }
         controller.onTabDetached = { [weak self] detached in
-            guard let self else { return }
-            self.detachedTerminals.append(detached)
-            self.refreshDetachedTerminalsMenu()
+            self?.storeDetached(detached)
+        }
+        controller.onTabMoveToNewWindow = { [weak self] detached in
+            guard let self, self.restoreDetached(detached, asTabIn: nil) else {
+                return false
+            }
             self.refreshPets()
             self.refreshShortcutHints()
+            return true
         }
         return controller
     }()
@@ -1266,26 +1277,47 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     @objc private func detachStandardTerminal(_ sender: Any?) {
+        guard let window = standardTerminalWindow(from: sender) else { return }
+        detachmentInProgress = true
+        defer { detachmentInProgress = false }
+        guard let detached = extractStandardTerminal(from: window) else { return }
+        storeDetached(detached)
+    }
+
+    @objc private func moveStandardTerminalToQuick(_ sender: Any?) {
+        guard let window = standardTerminalWindow(from: sender) else { return }
+        detachmentInProgress = true
+        defer { detachmentInProgress = false }
+        guard let detached = extractStandardTerminal(from: window) else { return }
+        if !quickTerminal.adopt(detached) {
+            storeDetached(detached)
+        }
+    }
+
+    private func standardTerminalWindow(from sender: Any?) -> NSWindow? {
         guard let item = sender as? NSMenuItem,
               let window = item.representedObject as? NSWindow,
               window.tabbingIdentifier == "infinitty",
               window !== quickTerminal.window,
               !activeSessions(in: window).isEmpty
-        else { return }
+        else { return nil }
+        return window
+    }
 
+    private func extractStandardTerminal(from window: NSWindow) -> DetachedTerminal? {
         activeRename?.dismiss(committed: false)
         activeRename = nil
         let id = ObjectIdentifier(window)
         let customTitle = titleOverrides[id]
         let preferredFocus = window.firstResponder as? TerminalView
-        detachmentInProgress = true
-        defer { detachmentInProgress = false }
-        guard let content = takeTerminalContent(from: window) else { return }
-
-        let detached = DetachedTerminal(
+        guard let content = takeTerminalContent(from: window) else { return nil }
+        return DetachedTerminal(
             rootView: content,
             customTitle: customTitle,
             preferredFocus: preferredFocus)
+    }
+
+    private func storeDetached(_ detached: DetachedTerminal) {
         detachedTerminals.append(detached)
         refreshDetachedTerminalsMenu()
         refreshPets()

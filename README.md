@@ -216,15 +216,17 @@ Font to use one everywhere.
 - **Tabs**: native macOS tabs — ⌘T new tab, ⇧⌘←/→ previous/next tab,
   ⌘1–8 select by position, ⌘9 selects the last tab, and the tab bar "+" works;
   hold ⌘ to reveal the numbers in tab titles; ⇧⌘T renames the active tab
-- **Detached terminals**: right-click a native tab, a lone terminal window's
-  titlebar, or a quick-terminal tab and choose **Detach**. The complete live
-  terminal tree—including splits, processes, scrollback, and its custom
-  name—moves to **Window → Detached Terminals** and no longer occupies a tab or
-  window. From its submenu, restore it as the last Quick Terminal tab, in a new
-  standard window, or as the last tab in the current standard window. infinitty
-  stays resident while detached terminals are running, and exited panes or
-  terminals disappear from the menu automatically. Code View is window-scoped
-  and closes when its terminal is detached.
+- **Move or detach terminals**: right-click a native tab (or a lone terminal
+  window's titlebar) to **Move to Quick Terminal**, or right-click a
+  quick-terminal tab to **Move to New Window**. Both transfer the complete live
+  terminal tree—including splits, processes, scrollback, and its custom name—
+  directly to the destination. Choose **Detach** instead to remove it from all
+  tabs and windows and list it under **Window → Detached Terminals**. From that
+  submenu, restore it as the last Quick Terminal tab, in a new standard window,
+  or as the last tab in the current standard window. infinitty stays resident
+  while detached terminals are running, and exited panes or terminals disappear
+  from the menu automatically. Code View is window-scoped and closes when its
+  terminal is moved or detached.
 - **Splits**: ⌘D split right, ⇧⌘D split down, arbitrarily nested; ⌘W closes
   the focused pane (tab closes when its last pane exits); ⇧⌥←/→/↑/↓ focuses
   and briefly highlights the nearest pane in that direction; hold ⇧⌥ to reveal
