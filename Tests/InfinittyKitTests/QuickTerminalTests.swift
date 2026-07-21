@@ -136,7 +136,13 @@ final class QuickTerminalTests: XCTestCase {
         XCTAssertEqual(tabButtons.map(\.alignment), [.center, .center])
         XCTAssertEqual(tabButtons[0].frame.width, tabButtons[1].frame.width)
         XCTAssertGreaterThan(tabButtons.reduce(0) { $0 + $1.frame.width }, 400)
-        XCTAssertEqual(tabButtons[0].menu?.items.map(\.title), ["Detach"])
+        XCTAssertEqual(
+            tabButtons[0].menu?.items.map(\.title),
+            ["Move to New Window", "", "Detach"])
+        var movedIndex: Int?
+        strip.onMoveToNewWindow = { movedIndex = $0 }
+        strip.handleMoveToNewWindowRequest(at: 1)
+        XCTAssertEqual(movedIndex, 1)
         var detachedIndex: Int?
         strip.onDetach = { detachedIndex = $0 }
         strip.handleDetachRequest(at: 0)
@@ -283,6 +289,25 @@ final class QuickTerminalTests: XCTestCase {
         XCTAssertEqual(controller.tabCount, 2)
         XCTAssertEqual(controller.activeSessions.map(\.id), [second.id])
         XCTAssertTrue(second.view.window === window)
+
+        var movedPayload: DetachedTerminal?
+        var fallbackPayload: DetachedTerminal?
+        controller.onTabMoveToNewWindow = { detached in
+            movedPayload = detached
+            return true
+        }
+        controller.onTabDetached = { fallbackPayload = $0 }
+        XCTAssertTrue(controller.moveTabToNewWindow(at: 1))
+        XCTAssertEqual(controller.tabCount, 1)
+        XCTAssertTrue(try XCTUnwrap(movedPayload).contains(second.view))
+        XCTAssertNil(fallbackPayload)
+        XCTAssertTrue(controller.adopt(try XCTUnwrap(movedPayload)))
+
+        controller.onTabMoveToNewWindow = { _ in false }
+        XCTAssertFalse(controller.moveTabToNewWindow(at: 1))
+        XCTAssertEqual(controller.tabCount, 1)
+        XCTAssertTrue(try XCTUnwrap(fallbackPayload).contains(second.view))
+        XCTAssertTrue(controller.adopt(try XCTUnwrap(fallbackPayload)))
 
         XCTAssertFalse(controller.removeTab(containing: second))
         XCTAssertEqual(controller.tabCount, 1)

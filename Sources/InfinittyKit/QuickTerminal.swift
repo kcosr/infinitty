@@ -244,6 +244,7 @@ final class QuickTabRenameTextView: TabRenameTextView {
 final class QuickTerminalTabStripView: NSView {
     var onSelect: ((Int) -> Void)?
     var onRenameRequest: ((Int) -> Void)?
+    var onMoveToNewWindow: ((Int) -> Void)?
     var onDetach: ((Int) -> Void)?
     var onNewTab: (() -> Void)?
     var onClose: ((Int) -> Void)?
@@ -320,6 +321,13 @@ final class QuickTerminalTabStripView: NSView {
                 button.layer?.cornerRadius = 6
                 button.layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
                 let menu = NSMenu()
+                let move = menu.addItem(
+                    withTitle: "Move to New Window",
+                    action: #selector(moveToNewWindowPressed(_:)),
+                    keyEquivalent: "")
+                move.target = self
+                move.tag = index
+                menu.addItem(.separator())
                 let detach = menu.addItem(
                     withTitle: "Detach",
                     action: #selector(detachPressed(_:)),
@@ -479,11 +487,20 @@ final class QuickTerminalTabStripView: NSView {
         onDetach?(index)
     }
 
+    func handleMoveToNewWindowRequest(at index: Int) {
+        guard buttons.indices.contains(index) else { return }
+        commitRename()
+        onMoveToNewWindow?(index)
+    }
+
     @objc private func tabPressed(_ sender: NSButton) {
         handleTabClick(at: sender.tag, clickCount: NSApp.currentEvent?.clickCount ?? 1)
     }
     @objc private func detachPressed(_ sender: NSMenuItem) {
         handleDetachRequest(at: sender.tag)
+    }
+    @objc private func moveToNewWindowPressed(_ sender: NSMenuItem) {
+        handleMoveToNewWindowRequest(at: sender.tag)
     }
     @objc private func addPressed(_ sender: Any?) {
         commitRename() // ditto: "+" mid-rename saves the typed name first
@@ -572,6 +589,7 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
     private(set) var visible = false
     var onTabsChanged: (() -> Void)?
     var onTabDetached: ((DetachedTerminal) -> Void)?
+    var onTabMoveToNewWindow: ((DetachedTerminal) -> Bool)?
 
     init(
         config: AppConfig,
@@ -725,6 +743,28 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
     /// without terminating any of its panes.
     @discardableResult
     func detachTab(at index: Int) -> DetachedTerminal? {
+        extractTab(at: index) { [weak self] detached in
+            self?.onTabDetached?(detached)
+        }
+    }
+
+    /// Move a quick tab directly to a standard window. If the destination
+    /// cannot be created, preserve the live payload in the Detached menu.
+    @discardableResult
+    func moveTabToNewWindow(at index: Int) -> Bool {
+        var moved = false
+        guard extractTab(at: index, deliverBeforeTeardown: { [weak self] detached in
+            moved = self?.onTabMoveToNewWindow?(detached) ?? false
+            if !moved { self?.onTabDetached?(detached) }
+        }) != nil else { return false }
+        return moved
+    }
+
+    @discardableResult
+    private func extractTab(
+        at index: Int,
+        deliverBeforeTeardown: (DetachedTerminal) -> Void
+    ) -> DetachedTerminal? {
         _ = tabsView?.strip.commitRename()
         guard tabs.indices.contains(index), let tabsView else { return nil }
         let tab = tabs[index]
@@ -742,10 +782,10 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
             rootView: content,
             customTitle: tab.customTitle,
             preferredFocus: tab.lastFocusedView)
-        // Publish residency before closing an emptied panel; otherwise AppKit
-        // can ask whether the application should terminate in the narrow gap
-        // between the panel closing and the detached item being registered.
-        onTabDetached?(detached)
+        // Deliver before closing an emptied panel. The app either reparents the
+        // content immediately or retains it in the Detached menu, ensuring its
+        // residency check sees an owner before AppKit asks about termination.
+        deliverBeforeTeardown(detached)
         if tabs.isEmpty {
             lastSessionDidExit()
         } else {
@@ -1040,6 +1080,9 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
         }
         tabsView.strip.onNewTab = { [weak self] in
             _ = self?.newTab()
+        }
+        tabsView.strip.onMoveToNewWindow = { [weak self] index in
+            _ = self?.moveTabToNewWindow(at: index)
         }
         tabsView.strip.onDetach = { [weak self] index in
             _ = self?.detachTab(at: index)
