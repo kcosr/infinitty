@@ -42,7 +42,9 @@ public struct ForegroundProcessInfo: Equatable {
 /// `NotificationCenter.default`.
 public final class ForegroundProcessTracker {
     public static let didChangeNotification = Notification.Name("infinitty.foregroundProcess.didChange")
+    public static let cwdDidChangeNotification = Notification.Name("infinitty.foregroundProcess.cwdDidChange")
     public static let infoKey = "info"
+    public static let cwdKey = "cwd"
 
     public let shellPid: pid_t
     public private(set) var current: ForegroundProcessInfo? {
@@ -52,6 +54,19 @@ public final class ForegroundProcessTracker {
                     name: ForegroundProcessTracker.didChangeNotification,
                     object: self,
                     userInfo: [Self.infoKey: current as Any]
+                )
+            }
+        }
+    }
+    /// Live working directory of the foreground process (the shell itself when
+    /// sitting at a prompt), refreshed on the same poll as `current`.
+    public private(set) var currentCwd: String? {
+        didSet {
+            if currentCwd != oldValue {
+                NotificationCenter.default.post(
+                    name: ForegroundProcessTracker.cwdDidChangeNotification,
+                    object: self,
+                    userInfo: [Self.cwdKey: currentCwd as Any]
                 )
             }
         }
@@ -82,6 +97,7 @@ public final class ForegroundProcessTracker {
         timer?.cancel(); timer = nil
         isRunning = false
         current = nil
+        currentCwd = nil
     }
 
     /// Force an immediate poll (e.g. right after a command starts/ends).
@@ -90,10 +106,66 @@ public final class ForegroundProcessTracker {
     }
 
     private func tick() {
-        current = Self.probeForeground(of: shellPid)
+        let foreground = Self.probeForeground(of: shellPid)
+        current = foreground
+        currentCwd = foreground.flatMap { Self.directory(of: $0.pid) }
     }
 
     // MARK: - probing
+
+    /// Live working directory of any process, via its cwd vnode — the same
+    /// mechanism iTerm2 uses for "new tab with current directory". No shell
+    /// integration required; works for shells and foreground tools alike.
+    public static func directory(of pid: pid_t) -> String? {
+        guard pid > 1 else { return nil }
+        var info = proc_vnodepathinfo()
+        let size = Int32(MemoryLayout<proc_vnodepathinfo>.size)
+        let n = proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &info, size)
+        guard n == size else { return nil }
+        let path = withUnsafePointer(to: &info.pvi_cdir.vip_path) { ptr in
+            ptr.withMemoryRebound(to: CChar.self, capacity: Int(MAXPATHLEN)) {
+                String(cString: $0)
+            }
+        }
+        return path.isEmpty ? nil : path
+    }
+
+    /// Fresh one-shot probe of a shell's foreground process. When the shell
+    /// sits at a prompt this reports the shell itself (pid == shellPid).
+    public static func foregroundProcess(of shellPid: pid_t) -> ForegroundProcessInfo? {
+        probeForeground(of: shellPid)
+    }
+
+    /// The sessions with a real process in the foreground right now (fresh
+    /// probe, not the 2s poll): an idle shell at a prompt doesn't count.
+    static func runningProcesses(
+        in sessions: [TerminalSession]
+    ) -> [(session: TerminalSession, info: ForegroundProcessInfo)] {
+        sessions.compactMap { session in
+            guard let info = foregroundProcess(of: session.pty.pid),
+                  info.pid != session.pty.pid else { return nil }
+            return (session, info)
+        }
+    }
+
+    /// The "processes still running" confirmation alert. Cancel is the
+    /// default button; Close terminates the processes.
+    public static func closeConfirmationAlert(
+        for processes: [ForegroundProcessInfo]
+    ) -> NSAlert {
+        let names = processes.map(\.displayName).joined(separator: ", ")
+        let alert = NSAlert()
+        alert.messageText = processes.count == 1
+            ? "“\(names)” is still running"
+            : "\(processes.count) processes are still running"
+        alert.informativeText = processes.count == 1
+            ? "Closing will terminate it."
+            : "Closing will terminate them: \(names)."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Close")
+        return alert
+    }
 
     private static func probeForeground(of shellPid: pid_t) -> ForegroundProcessInfo? {
         // 1) find direct children of the shell
