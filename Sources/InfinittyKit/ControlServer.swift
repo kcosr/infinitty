@@ -26,6 +26,8 @@ final class ControlServer {
     private static var nextID = 0
     private static let idLock = NSLock()
 
+    var isRunning: Bool { listenFD >= 0 }
+
     init(terminal: Terminal, pty: PTY) {
         self.terminal = terminal
         self.pty = pty
@@ -37,6 +39,7 @@ final class ControlServer {
     }
 
     func start() {
+        guard listenFD < 0 else { return }
         unlink(path)
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { return }
@@ -70,14 +73,19 @@ final class ControlServer {
         _ = fcntl(fd, F_SETFD, FD_CLOEXEC)
         listenFD = fd
 
-        let thread = Thread { [weak self] in self?.acceptLoop() }
+        let thread = Thread { [weak self] in self?.acceptLoop(fd: fd) }
         thread.name = "infinitty-control"
         thread.qualityOfService = .utility
         thread.start()
     }
 
     func stop() {
-        if listenFD >= 0 { close(listenFD) }
+        let fd = listenFD
+        listenFD = -1
+        if fd >= 0 {
+            _ = Darwin.shutdown(fd, SHUT_RDWR)
+            close(fd)
+        }
         unlink(path)
     }
 
@@ -86,9 +94,9 @@ final class ControlServer {
     /// callers should page with `history N`).
     static let maxResponseBytes = 262_144
 
-    private func acceptLoop() {
+    private func acceptLoop(fd: Int32) {
         while true {
-            let client = accept(listenFD, nil, nil)
+            let client = accept(fd, nil, nil)
             if client < 0 {
                 if errno == EINTR { continue }
                 break

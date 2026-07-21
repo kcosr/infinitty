@@ -60,6 +60,7 @@ struct AppConfig {
     var aiKey: String?
     var aiModel: String?
     var agentGlow = true // pulsing inner glow while an agent drives the pane
+    var controlSockets = true // app-level and per-pane Unix control sockets
     var sourcePath: String? // config file in use (for live reload)
 
     var atlasKey: String {
@@ -237,6 +238,8 @@ struct AppConfig {
                 aiModel = value
             case "agent-glow":
                 agentGlow = AppConfig.parseBool(value)
+            case "control-sockets":
+                controlSockets = AppConfig.parseBool(value)
             default:
                 break // unknown keys (themes, cursor styles, ...) ignored
             }
@@ -299,6 +302,7 @@ struct AppConfig {
             if petMode != "window" { out += "pet-mode = pane\n" }
         }
         if !agentGlow { out += "agent-glow = false\n" }
+        if !controlSockets { out += "control-sockets = false\n" }
         // Settings rewrites the managed config. Do not perpetuate a malformed
         // shortcut that can never be registered; valid-but-currently-busy
         // shortcuts still serialize because registration availability is

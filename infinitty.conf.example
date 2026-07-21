@@ -34,6 +34,7 @@
 
 # agents & extras
 # agent-glow       = true          # pulsing border while socket-driven
+# control-sockets  = true          # app + pane control sockets; false disables both
 # notch-display    = builtin       # builtin | external | primary | all
 # markdown-command = glow -p       # cmd-click on .md files
 # pet-mode         = window        # window (one, bottom-right pane) | pane
