@@ -253,6 +253,15 @@ enum QuickTabReordering {
         let adjusted = insertionSlot > sourceIndex ? insertionSlot - 1 : insertionSlot
         return min(max(adjusted, 0), tabCount - 1)
     }
+
+    static func acceptsDrop(
+        y: CGFloat,
+        in bounds: NSRect,
+        cancellationMargin: CGFloat
+    ) -> Bool {
+        y >= bounds.minY - cancellationMargin
+            && y <= bounds.maxY + cancellationMargin
+    }
 }
 
 enum QuickTabDragAppearance {
@@ -329,6 +338,9 @@ final class QuickTerminalTabStripView: NSView {
     private let dropIndicator = NSView()
 
     var isRenaming: Bool { renameEditor != nil }
+    var hasDragFeedback: Bool {
+        draggedIndex != nil || draggedButton != nil || dragInsertionSlot != nil
+    }
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -581,6 +593,7 @@ final class QuickTerminalTabStripView: NSView {
               let tabButton = button as? QuickTerminalTabButton else { return }
         if highlighted {
             button.alphaValue = 1
+            button.font = .systemFont(ofSize: 12, weight: .semibold)
             button.contentTintColor = .labelColor
             button.layer?.backgroundColor = NSColor.clear.cgColor
             button.layer?.borderWidth = 0
@@ -589,6 +602,20 @@ final class QuickTerminalTabStripView: NSView {
             tabButton.dragBackgroundColor = nil
             applyNormalAppearance(to: button, at: index)
         }
+    }
+
+    @discardableResult
+    func beginDrag(on button: NSButton, at location: NSPoint) -> Bool {
+        guard buttons.count > 1,
+              buttons.indices.contains(button.tag),
+              buttons[button.tag] === button else { return false }
+        commitRename()
+        draggedIndex = button.tag
+        draggedButton = button
+        dropIndicator.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
+        setDragHighlighted(true, for: button)
+        updateDragInsertion(at: location)
+        return true
     }
 
     func handleMoveToNewWindowRequest(at index: Int) {
@@ -605,15 +632,10 @@ final class QuickTerminalTabStripView: NSView {
         let location = gesture.location(in: self)
         switch gesture.state {
         case .began:
-            guard buttons.count > 1, buttons.indices.contains(button.tag) else { return }
-            commitRename()
-            draggedIndex = button.tag
-            draggedButton = button
-            setDragHighlighted(true, for: button)
-            updateDragInsertion(at: location.x)
+            _ = beginDrag(on: button, at: location)
         case .changed:
             guard draggedIndex != nil else { return }
-            updateDragInsertion(at: location.x)
+            updateDragInsertion(at: location)
         case .ended:
             guard let sourceIndex = draggedIndex else { return }
             let resolvedDestination: Int?
@@ -649,9 +671,18 @@ final class QuickTerminalTabStripView: NSView {
     }
     @objc private func closePressed(_ sender: Any?) { onClose?(selectedIndex) }
 
-    private func updateDragInsertion(at x: CGFloat) {
+    private func updateDragInsertion(at location: NSPoint) {
         guard let sourceIndex = draggedIndex else { return }
-        let slot = buttons.firstIndex(where: { x < $0.frame.midX }) ?? buttons.count
+        guard QuickTabReordering.acceptsDrop(
+            y: location.y,
+            in: bounds,
+            cancellationMargin: bounds.height)
+        else {
+            dragInsertionSlot = nil
+            dropIndicator.isHidden = true
+            return
+        }
+        let slot = buttons.firstIndex(where: { location.x < $0.frame.midX }) ?? buttons.count
         dragInsertionSlot = slot
         let destination = QuickTabReordering.destinationIndex(
             tabCount: buttons.count,
@@ -680,7 +711,7 @@ final class QuickTerminalTabStripView: NSView {
             height: max(bounds.height - 10, 0))
     }
 
-    private func clearDragFeedback() {
+    func clearDragFeedback() {
         if let draggedButton { setDragHighlighted(false, for: draggedButton) }
         draggedButton = nil
         draggedIndex = nil
@@ -1201,6 +1232,7 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
     }
 
     func hide(reason: QuickTerminalHideReason = .explicit) {
+        tabsView?.strip.clearDragFeedback()
         guard visible, let window else { return }
         visible = false
         transition &+= 1
