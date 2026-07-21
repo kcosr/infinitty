@@ -241,9 +241,72 @@ final class QuickTabRenameTextView: TabRenameTextView {
     }
 }
 
+enum QuickTabReordering {
+    static func destinationIndex(
+        tabCount: Int,
+        sourceIndex: Int,
+        insertionSlot: Int
+    ) -> Int? {
+        guard tabCount > 0,
+              (0..<tabCount).contains(sourceIndex),
+              (0...tabCount).contains(insertionSlot) else { return nil }
+        let adjusted = insertionSlot > sourceIndex ? insertionSlot - 1 : insertionSlot
+        return min(max(adjusted, 0), tabCount - 1)
+    }
+}
+
+enum QuickTabDragAppearance {
+    /// Preserve the selected tab's gray body, then composite the system accent
+    /// tint over it. Returning the flattened equivalent lets the button keep a
+    /// single background layer without losing the brightness of the gray base.
+    static func backgroundColor(accent: NSColor = .controlAccentColor) -> NSColor {
+        let base = NSColor(deviceWhite: 1, alpha: 0.14)
+        guard let tint = accent.withAlphaComponent(0.08).usingColorSpace(.deviceRGB),
+              let resolvedBase = base.usingColorSpace(.deviceRGB)
+        else { return base }
+
+        let tintAlpha = tint.alphaComponent
+        let baseAlpha = resolvedBase.alphaComponent
+        let outputAlpha = tintAlpha + baseAlpha * (1 - tintAlpha)
+        guard outputAlpha > 0 else { return .clear }
+        func component(_ tintValue: CGFloat, _ baseValue: CGFloat) -> CGFloat {
+            (tintValue * tintAlpha + baseValue * baseAlpha * (1 - tintAlpha))
+                / outputAlpha
+        }
+        return NSColor(
+            deviceRed: component(tint.redComponent, resolvedBase.redComponent),
+            green: component(tint.greenComponent, resolvedBase.greenComponent),
+            blue: component(tint.blueComponent, resolvedBase.blueComponent),
+            alpha: outputAlpha)
+    }
+}
+
+/// Draw drag feedback as button content rather than as the button layer's
+/// background. AppKit redraws an NSButton's tracking appearance when a pan
+/// gesture takes over from the initial press; keeping the fill here prevents
+/// that redraw from clearing the tint for the remainder of the drag.
+final class QuickTerminalTabButton: NSButton {
+    var dragBackgroundColor: NSColor? {
+        didSet { needsDisplay = true }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if let dragBackgroundColor {
+            dragBackgroundColor.setFill()
+            NSBezierPath(
+                roundedRect: bounds,
+                xRadius: layer?.cornerRadius ?? 6,
+                yRadius: layer?.cornerRadius ?? 6
+            ).fill()
+        }
+        super.draw(dirtyRect)
+    }
+}
+
 final class QuickTerminalTabStripView: NSView {
     var onSelect: ((Int) -> Void)?
     var onRenameRequest: ((Int) -> Void)?
+    var onReorder: ((Int, Int) -> Void)?
     var onMoveToNewWindow: ((Int) -> Void)?
     var onDetach: ((Int) -> Void)?
     var onNewTab: (() -> Void)?
@@ -255,10 +318,14 @@ final class QuickTerminalTabStripView: NSView {
     private var renamingIndex: Int?
     private weak var renameEditor: QuickTabRenameTextView?
     private var endingRename = false
+    private var draggedIndex: Int?
+    private var dragInsertionSlot: Int?
+    private weak var draggedButton: NSButton?
     private let backgroundEffect = NSVisualEffectView()
     private let backgroundTint = NSView()
     private let addButton = NSButton(title: "+", target: nil, action: nil)
     private let closeButton = NSButton(title: "×", target: nil, action: nil)
+    private let dropIndicator = NSView()
 
     var isRenaming: Bool { renameEditor != nil }
 
@@ -296,6 +363,12 @@ final class QuickTerminalTabStripView: NSView {
         closeButton.contentTintColor = .secondaryLabelColor
         closeButton.toolTip = "Close Quick Tab"
         addSubview(closeButton)
+
+        dropIndicator.wantsLayer = true
+        dropIndicator.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
+        dropIndicator.layer?.cornerRadius = 1.5
+        dropIndicator.isHidden = true
+        addSubview(dropIndicator)
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -303,13 +376,14 @@ final class QuickTerminalTabStripView: NSView {
     func update(titles: [String], selectedIndex: Int) {
         self.selectedIndex = selectedIndex
         if buttons.count != titles.count {
+            clearDragFeedback()
             // A tab appeared or vanished mid-rename: renamingIndex is
             // positional, so the editor could re-anchor over the wrong tab.
             // Abandon the edit instead.
             if renameEditor != nil { finishRename(committing: false) }
             buttons.forEach { $0.removeFromSuperview() }
             buttons = titles.indices.map { index in
-                let button = NSButton(
+                let button = QuickTerminalTabButton(
                     title: "",
                     target: self,
                     action: #selector(tabPressed(_:)))
@@ -320,6 +394,10 @@ final class QuickTerminalTabStripView: NSView {
                 button.wantsLayer = true
                 button.layer?.cornerRadius = 6
                 button.layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
+                let pan = NSPanGestureRecognizer(
+                    target: self,
+                    action: #selector(tabDragged(_:)))
+                button.addGestureRecognizer(pan)
                 let menu = NSMenu()
                 let move = menu.addItem(
                     withTitle: "Move to New Window",
@@ -342,16 +420,7 @@ final class QuickTerminalTabStripView: NSView {
         for (index, title) in titles.enumerated() {
             let button = buttons[index]
             button.title = title
-            button.font = .systemFont(
-                ofSize: 12,
-                weight: index == selectedIndex ? .semibold : .regular)
-            button.contentTintColor = index == selectedIndex
-                ? .labelColor
-                : .secondaryLabelColor
-            button.layer?.backgroundColor = index == selectedIndex
-                ? NSColor.white.withAlphaComponent(0.14).cgColor
-                : NSColor.clear.cgColor
-            button.layer?.borderWidth = index == selectedIndex ? 1 : 0
+            applyNormalAppearance(to: button, at: index)
             button.toolTip = title
         }
         closeButton.isHidden = !titles.indices.contains(selectedIndex)
@@ -360,6 +429,7 @@ final class QuickTerminalTabStripView: NSView {
             closeButton.isHidden = true
         }
         addSubview(closeButton, positioned: .above, relativeTo: nil)
+        addSubview(dropIndicator, positioned: .above, relativeTo: nil)
         needsLayout = true
     }
 
@@ -447,6 +517,7 @@ final class QuickTerminalTabStripView: NSView {
            let renameEditor {
             renameEditor.frame = buttons[renamingIndex].frame.insetBy(dx: 6, dy: 2)
         }
+        layoutDropIndicator()
     }
 
     private func finishRename(committing: Bool) {
@@ -487,6 +558,29 @@ final class QuickTerminalTabStripView: NSView {
         onDetach?(index)
     }
 
+    func handleReorderRequest(from sourceIndex: Int, to destinationIndex: Int) {
+        guard buttons.indices.contains(sourceIndex),
+              buttons.indices.contains(destinationIndex),
+              sourceIndex != destinationIndex else { return }
+        commitRename()
+        onReorder?(sourceIndex, destinationIndex)
+    }
+
+    func setDragHighlighted(_ highlighted: Bool, for button: NSButton) {
+        guard let index = buttons.firstIndex(where: { $0 === button }),
+              let tabButton = button as? QuickTerminalTabButton else { return }
+        if highlighted {
+            button.alphaValue = 1
+            button.contentTintColor = .labelColor
+            button.layer?.backgroundColor = NSColor.clear.cgColor
+            button.layer?.borderWidth = 0
+            tabButton.dragBackgroundColor = QuickTabDragAppearance.backgroundColor()
+        } else {
+            tabButton.dragBackgroundColor = nil
+            applyNormalAppearance(to: button, at: index)
+        }
+    }
+
     func handleMoveToNewWindowRequest(at index: Int) {
         guard buttons.indices.contains(index) else { return }
         commitRename()
@@ -495,6 +589,41 @@ final class QuickTerminalTabStripView: NSView {
 
     @objc private func tabPressed(_ sender: NSButton) {
         handleTabClick(at: sender.tag, clickCount: NSApp.currentEvent?.clickCount ?? 1)
+    }
+    @objc private func tabDragged(_ gesture: NSPanGestureRecognizer) {
+        guard let button = gesture.view as? NSButton else { return }
+        let location = gesture.location(in: self)
+        switch gesture.state {
+        case .began:
+            guard buttons.count > 1, buttons.indices.contains(button.tag) else { return }
+            commitRename()
+            draggedIndex = button.tag
+            draggedButton = button
+            setDragHighlighted(true, for: button)
+            updateDragInsertion(at: location.x)
+        case .changed:
+            guard draggedIndex != nil else { return }
+            updateDragInsertion(at: location.x)
+        case .ended:
+            guard let sourceIndex = draggedIndex else { return }
+            let resolvedDestination: Int?
+            if let slot = dragInsertionSlot {
+                resolvedDestination = QuickTabReordering.destinationIndex(
+                    tabCount: buttons.count,
+                    sourceIndex: sourceIndex,
+                    insertionSlot: slot)
+            } else {
+                resolvedDestination = nil
+            }
+            clearDragFeedback()
+            if let destinationIndex = resolvedDestination {
+                handleReorderRequest(from: sourceIndex, to: destinationIndex)
+            }
+        case .cancelled, .failed:
+            clearDragFeedback()
+        default:
+            break
+        }
     }
     @objc private func detachPressed(_ sender: NSMenuItem) {
         handleDetachRequest(at: sender.tag)
@@ -507,6 +636,69 @@ final class QuickTerminalTabStripView: NSView {
         onNewTab?()
     }
     @objc private func closePressed(_ sender: Any?) { onClose?(selectedIndex) }
+
+    private func updateDragInsertion(at x: CGFloat) {
+        guard let sourceIndex = draggedIndex else { return }
+        let slot = buttons.firstIndex(where: { x < $0.frame.midX }) ?? buttons.count
+        dragInsertionSlot = slot
+        let destination = QuickTabReordering.destinationIndex(
+            tabCount: buttons.count,
+            sourceIndex: sourceIndex,
+            insertionSlot: slot)
+        dropIndicator.isHidden = destination == sourceIndex
+        layoutDropIndicator()
+    }
+
+    private func layoutDropIndicator() {
+        guard let slot = dragInsertionSlot,
+              slot >= 0, slot <= buttons.count,
+              !buttons.isEmpty else { return }
+        let x: CGFloat
+        if slot == 0 {
+            x = buttons[0].frame.minX
+        } else if slot == buttons.count {
+            x = buttons[buttons.count - 1].frame.maxX
+        } else {
+            x = (buttons[slot - 1].frame.maxX + buttons[slot].frame.minX) / 2
+        }
+        dropIndicator.frame = NSRect(
+            x: x - 1.5,
+            y: 5,
+            width: 3,
+            height: max(bounds.height - 10, 0))
+    }
+
+    private func clearDragFeedback() {
+        if let draggedButton { setDragHighlighted(false, for: draggedButton) }
+        draggedButton = nil
+        draggedIndex = nil
+        dragInsertionSlot = nil
+        dropIndicator.isHidden = true
+    }
+
+    private func applyNormalAppearance(to button: NSButton, at index: Int) {
+        if let tabButton = button as? QuickTerminalTabButton,
+           tabButton.dragBackgroundColor != nil {
+            button.alphaValue = 1
+            button.font = .systemFont(ofSize: 12, weight: .semibold)
+            button.contentTintColor = .labelColor
+            button.layer?.backgroundColor = NSColor.clear.cgColor
+            button.layer?.borderWidth = 0
+            return
+        }
+        button.alphaValue = 1
+        button.font = .systemFont(
+            ofSize: 12,
+            weight: index == selectedIndex ? .semibold : .regular)
+        button.contentTintColor = index == selectedIndex
+            ? .labelColor
+            : .secondaryLabelColor
+        button.layer?.backgroundColor = index == selectedIndex
+            ? NSColor.white.withAlphaComponent(0.14).cgColor
+            : NSColor.clear.cgColor
+        button.layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
+        button.layer?.borderWidth = index == selectedIndex ? 1 : 0
+    }
 }
 
 final class QuickTerminalTabsView: NSView {
@@ -864,6 +1056,27 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
         return selectTab(at: index)
     }
 
+    /// Reorder internal quick tabs without moving their attached page trees.
+    /// Track selection by stable identity so dragging either the active tab or
+    /// a background tab never changes which terminal is visible or focused.
+    @discardableResult
+    func reorderTab(from sourceIndex: Int, to destinationIndex: Int) -> Bool {
+        guard tabs.indices.contains(sourceIndex),
+              tabs.indices.contains(destinationIndex),
+              sourceIndex != destinationIndex else { return false }
+        _ = tabsView?.strip.commitRename()
+        let selectedTab = tabs.indices.contains(selectedIndex) ? tabs[selectedIndex] : nil
+        let moved = tabs.remove(at: sourceIndex)
+        tabs.insert(moved, at: destinationIndex)
+        if let selectedTab,
+           let newSelectedIndex = tabs.firstIndex(where: { $0 === selectedTab }) {
+            selectedIndex = newSelectedIndex
+        }
+        showTab(at: selectedIndex)
+        onTabsChanged?()
+        return true
+    }
+
     /// Selects and focuses a pane even when it belongs to a hidden internal
     /// tab. If the panel is hidden, `show()` preserves this responder through
     /// the slide-down animation.
@@ -1069,6 +1282,9 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
     private func configureCallbacks(for tabsView: QuickTerminalTabsView) {
         tabsView.strip.onSelect = { [weak self] index in
             _ = self?.selectTab(at: index)
+        }
+        tabsView.strip.onReorder = { [weak self] sourceIndex, destinationIndex in
+            _ = self?.reorderTab(from: sourceIndex, to: destinationIndex)
         }
         tabsView.strip.onRenameRequest = { [weak self, weak strip = tabsView.strip] index in
             guard let self else { return }
