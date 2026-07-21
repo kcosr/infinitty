@@ -1549,7 +1549,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     @discardableResult
     private func restoreDetached(
         _ detached: DetachedTerminal,
-        asTabIn host: NSWindow?
+        asTabIn host: NSWindow?,
+        focusOverride: TerminalView? = nil
     ) -> Bool {
         _ = detachedPreview.dismiss(ifPresenting: detached)
         let containedSessions = sessions(in: detached)
@@ -1574,7 +1575,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
-        let preferredFocus = detached.preferredFocus ?? representative.view
+        let preferredFocus = focusOverride ?? detached.preferredFocus ?? representative.view
         window.makeFirstResponder(preferredFocus)
         updateTitle(for: window)
         // Native tab attachment resizes the adopted window and can assign its
@@ -1904,9 +1905,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 if self.quickTerminal.contains(s) {
                     _ = self.quickTerminal.focus(s)
                 } else if let detached = self.detachedTerminal(containing: s),
-                          self.restoreDetached(detached, asTabIn: nil) {
+                          self.restoreDetached(
+                              detached,
+                              asTabIn: nil,
+                              focusOverride: s.view) {
                     self.finishRestoring(detached)
-                    s.view.window?.makeFirstResponder(s.view)
                 } else {
                     s.view.window?.makeKeyAndOrderFront(nil)
                     s.view.window?.makeFirstResponder(s.view)

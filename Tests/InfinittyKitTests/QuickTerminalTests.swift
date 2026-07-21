@@ -123,6 +123,10 @@ final class QuickTerminalTests: XCTestCase {
 
     func testQuickTabDropSlotsResolveAroundRemovedSource() {
         XCTAssertEqual(QuickTabReordering.destinationIndex(
+            tabCount: 1, sourceIndex: 0, insertionSlot: 0), 0)
+        XCTAssertEqual(QuickTabReordering.destinationIndex(
+            tabCount: 1, sourceIndex: 0, insertionSlot: 1), 0)
+        XCTAssertEqual(QuickTabReordering.destinationIndex(
             tabCount: 3, sourceIndex: 0, insertionSlot: 0), 0)
         XCTAssertEqual(QuickTabReordering.destinationIndex(
             tabCount: 3, sourceIndex: 0, insertionSlot: 1), 0)
@@ -138,6 +142,46 @@ final class QuickTerminalTests: XCTestCase {
             tabCount: 3, sourceIndex: 3, insertionSlot: 0))
         XCTAssertNil(QuickTabReordering.destinationIndex(
             tabCount: 3, sourceIndex: 0, insertionSlot: 4))
+    }
+
+    func testQuickTabDropCancelsBeyondOneStripHeight() {
+        let bounds = NSRect(x: 0, y: 0, width: 500, height: 34)
+
+        XCTAssertTrue(QuickTabReordering.acceptsDrop(
+            y: -34, in: bounds, cancellationMargin: bounds.height))
+        XCTAssertTrue(QuickTabReordering.acceptsDrop(
+            y: 68, in: bounds, cancellationMargin: bounds.height))
+        XCTAssertFalse(QuickTabReordering.acceptsDrop(
+            y: -34.1, in: bounds, cancellationMargin: bounds.height))
+        XCTAssertFalse(QuickTabReordering.acceptsDrop(
+            y: 68.1, in: bounds, cancellationMargin: bounds.height))
+    }
+
+    func testQuickTabDragGuardsAndStructuralCleanup() throws {
+        let strip = QuickTerminalTabStripView(
+            frame: NSRect(x: 0, y: 0, width: 500, height: 34))
+        strip.update(titles: ["one"], selectedIndex: 0)
+        strip.layoutSubtreeIfNeeded()
+        let singleButton = try XCTUnwrap(
+            strip.subviews.compactMap { $0 as? NSButton }.first { $0.title == "one" })
+        XCTAssertFalse(strip.beginDrag(
+            on: singleButton,
+            at: NSPoint(x: singleButton.frame.midX, y: singleButton.frame.midY)))
+
+        strip.update(titles: ["one", "two"], selectedIndex: 0)
+        strip.layoutSubtreeIfNeeded()
+        let firstButton = try XCTUnwrap(
+            strip.subviews.compactMap { $0 as? NSButton }.first { $0.title == "one" })
+        XCTAssertTrue(strip.beginDrag(
+            on: firstButton,
+            at: NSPoint(x: firstButton.frame.midX, y: firstButton.frame.midY)))
+        XCTAssertTrue(strip.hasDragFeedback)
+
+        strip.update(titles: ["two"], selectedIndex: 0)
+        XCTAssertFalse(strip.hasDragFeedback)
+        XCTAssertFalse(strip.beginDrag(
+            on: firstButton,
+            at: NSPoint(x: firstButton.frame.midX, y: firstButton.frame.midY)))
     }
 
     func testQuickTabStripShowsTitlesAndAddButton() throws {
@@ -200,6 +244,9 @@ final class QuickTerminalTests: XCTestCase {
         strip.handleReorderRequest(from: 0, to: 1)
         XCTAssertEqual(reorderedIndices?.0, 0)
         XCTAssertEqual(reorderedIndices?.1, 1)
+        reorderedIndices = nil
+        strip.handleReorderRequest(from: 1, to: 1)
+        XCTAssertNil(reorderedIndices)
         let close = try XCTUnwrap(
             strip.subviews.compactMap { $0 as? NSButton }.first { $0.title == "×" })
         var closedIndex: Int?
@@ -232,6 +279,27 @@ final class QuickTerminalTests: XCTestCase {
             strip.subviews.compactMap { $0 as? QuickTabRenameTextView }.first)
         cancelEditor.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
         XCTAssertTrue(cancelled)
+    }
+
+    func testQuickTabContextMenuResolvesStableIdentityAfterEarlierTabCloses() throws {
+        let strip = QuickTerminalTabStripView(
+            frame: NSRect(x: 0, y: 0, width: 500, height: 34))
+        let ids = [QuickTerminalTabID(), QuickTerminalTabID(), QuickTerminalTabID()]
+        strip.update(
+            titles: ["one", "two", "three"],
+            selectedIndex: 1,
+            tabIDs: ids)
+
+        let secondButton = try XCTUnwrap(
+            strip.subviews.compactMap { $0 as? NSButton }.first { $0.title == "two" })
+        let staleDetachItem = try XCTUnwrap(secondButton.menu?.items.last)
+
+        strip.update(
+            titles: ["two", "three"],
+            selectedIndex: 0,
+            tabIDs: [ids[1], ids[2]])
+
+        XCTAssertEqual(strip.contextMenuTabIndex(for: staleDetachItem), 0)
     }
 
     func testQuickTabControllerKeepsSessionsAttachedAcrossTabs() throws {
@@ -347,8 +415,18 @@ final class QuickTerminalTests: XCTestCase {
         controller.setCustomTitle(nil, for: firstTabID)
         XCTAssertEqual(controller.baseTitle(for: firstTabID), "changed automatically")
 
+        XCTAssertTrue(controller.selectTab(containing: second))
+        var activeTabDuringDetach: QuickTerminalTabID?
+        var activeSessionsDuringDetach: [Int] = []
+        controller.onTabDetached = { _ in
+            activeTabDuringDetach = controller.activeTabID
+            activeSessionsDuringDetach = controller.activeSessions.map(\.id)
+        }
         let detached = try XCTUnwrap(controller.detachTab(at: 1))
+        controller.onTabDetached = nil
         XCTAssertEqual(controller.tabCount, 1)
+        XCTAssertEqual(activeTabDuringDetach, firstTabID)
+        XCTAssertEqual(activeSessionsDuringDetach, [first.id])
         XCTAssertTrue(detached.contains(second.view))
         XCTAssertNil(second.view.window)
         XCTAssertTrue(controller.adopt(detached))
