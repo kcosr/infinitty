@@ -314,6 +314,7 @@ final class QuickTerminalTabStripView: NSView {
     var onRenameCommit: ((String) -> Void)?
     var onRenameCancel: (() -> Void)?
     private var buttons: [NSButton] = []
+    private var tabIDs: [QuickTerminalTabID] = []
     private var selectedIndex = 0
     private var renamingIndex: Int?
     private weak var renameEditor: QuickTabRenameTextView?
@@ -373,7 +374,15 @@ final class QuickTerminalTabStripView: NSView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func update(titles: [String], selectedIndex: Int) {
+    func update(
+        titles: [String],
+        selectedIndex: Int,
+        tabIDs suppliedTabIDs: [QuickTerminalTabID]? = nil
+    ) {
+        let resolvedTabIDs = suppliedTabIDs?.count == titles.count
+            ? suppliedTabIDs!
+            : titles.map { _ in QuickTerminalTabID() }
+        tabIDs = resolvedTabIDs
         self.selectedIndex = selectedIndex
         if buttons.count != titles.count {
             clearDragFeedback()
@@ -404,14 +413,12 @@ final class QuickTerminalTabStripView: NSView {
                     action: #selector(moveToNewWindowPressed(_:)),
                     keyEquivalent: "")
                 move.target = self
-                move.tag = index
                 menu.addItem(.separator())
                 let detach = menu.addItem(
                     withTitle: "Detach",
                     action: #selector(detachPressed(_:)),
                     keyEquivalent: "")
                 detach.target = self
-                detach.tag = index
                 button.menu = menu
                 addSubview(button)
                 return button
@@ -422,6 +429,9 @@ final class QuickTerminalTabStripView: NSView {
             button.title = title
             applyNormalAppearance(to: button, at: index)
             button.toolTip = title
+            let representedID = resolvedTabIDs[index].rawValue.uuidString
+            button.menu?.items.first?.representedObject = representedID
+            button.menu?.items.last?.representedObject = representedID
         }
         closeButton.isHidden = !titles.indices.contains(selectedIndex)
         if let renamingIndex, buttons.indices.contains(renamingIndex) {
@@ -626,10 +636,12 @@ final class QuickTerminalTabStripView: NSView {
         }
     }
     @objc private func detachPressed(_ sender: NSMenuItem) {
-        handleDetachRequest(at: sender.tag)
+        guard let index = contextMenuTabIndex(for: sender) else { return }
+        handleDetachRequest(at: index)
     }
     @objc private func moveToNewWindowPressed(_ sender: NSMenuItem) {
-        handleMoveToNewWindowRequest(at: sender.tag)
+        guard let index = contextMenuTabIndex(for: sender) else { return }
+        handleMoveToNewWindowRequest(at: index)
     }
     @objc private func addPressed(_ sender: Any?) {
         commitRename() // ditto: "+" mid-rename saves the typed name first
@@ -698,6 +710,13 @@ final class QuickTerminalTabStripView: NSView {
             : NSColor.clear.cgColor
         button.layer?.borderColor = NSColor.white.withAlphaComponent(0.18).cgColor
         button.layer?.borderWidth = index == selectedIndex ? 1 : 0
+    }
+
+    func contextMenuTabIndex(for item: NSMenuItem) -> Int? {
+        guard let value = item.representedObject as? String,
+              let id = UUID(uuidString: value)
+        else { return nil }
+        return tabIDs.firstIndex { $0.rawValue == id }
     }
 }
 
@@ -982,13 +1001,8 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
             rootView: content,
             customTitle: tab.customTitle,
             preferredFocus: tab.lastFocusedView)
-        // Deliver before closing an emptied panel. The app either reparents the
-        // content immediately or retains it in the Detached menu, ensuring its
-        // residency check sees an owner before AppKit asks about termination.
-        deliverBeforeTeardown(detached)
-        if tabs.isEmpty {
-            lastSessionDidExit()
-        } else {
+        let emptiedPanel = tabs.isEmpty
+        if !emptiedPanel {
             if index < selectedIndex {
                 selectedIndex -= 1
             } else if index == selectedIndex {
@@ -996,6 +1010,15 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
             }
             showTab(at: selectedIndex)
             onTabsChanged?()
+        }
+        // Deliver before closing an emptied panel. The app either reparents the
+        // content immediately or retains it in the Detached menu, ensuring its
+        // residency check sees an owner before AppKit asks about termination.
+        // When tabs survive, settle their selection first so callbacks never
+        // observe an out-of-range selectedIndex.
+        deliverBeforeTeardown(detached)
+        if emptiedPanel {
+            lastSessionDidExit()
         }
         return detached
     }
@@ -1400,7 +1423,10 @@ final class QuickTerminalController: NSObject, NSWindowDelegate {
             else { return title }
             return "⌘\(number)  \(title)"
         }
-        tabsView?.strip.update(titles: titles, selectedIndex: selectedIndex)
+        tabsView?.strip.update(
+            titles: titles,
+            selectedIndex: selectedIndex,
+            tabIDs: tabs.map(\.id))
     }
 
     private func displayTitle(for tab: Tab) -> String {
